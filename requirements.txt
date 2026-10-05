@@ -6,3 +6,5 @@ xlrd>=2.0
 PyMuPDF>=1.24
 pdfplumber>=0.11.10
 reportlab>=4.2
+Pillow>=10.4
+pytesseract>=0.3.13
