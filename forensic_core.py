@@ -872,7 +872,10 @@ def balance_check(df):
 
 
 def balance_mismatches(df):
-    return len(balance_check(df))def _ocr_pdf_position_rows(data):
+    return len(balance_check(df))
+
+
+def _ocr_pdf_position_rows(data):
     import fitz
     import pytesseract
     from PIL import Image
