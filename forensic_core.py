@@ -366,12 +366,93 @@ def _native_pdf_text_rows(data):
 
 
 def _native_pdf_position_rows(data):
+    """Extract native/digital bank PDFs using header x-positions and row-level column boundaries.
+
+    Important: amounts are assigned from their actual PDF x-position.  We do not
+    treat a number appearing inside narration as Debit/Credit merely because it
+    looks like money.
+    """
     import fitz
+
     doc = fitz.open(stream=data, filetype="pdf")
     frames = []
 
-    def ykey(w):
-        return round(w[1] / 2) * 2
+    date_re = re.compile(r"\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b")
+    amount_re = re.compile(r"^(?:₹\s*)?\(?\d[\d,]*(?:\.\d+)?\)?(?:\s*(?:CR|DR))?$", re.I)
+
+    def ykey(word):
+        return round(word[1] / 2) * 2
+
+    def center(word):
+        return (word[0] + word[2]) / 2
+
+    def clean_words(words):
+        return sorted(words, key=lambda z: z[0])
+
+    def header_x_positions(hws):
+        """Find one reliable x-center for each bank-statement column."""
+        hws = clean_words(hws)
+        items = [(w, norm(w[4])) for w in hws]
+
+        def phrase_x(phrases):
+            for phrase in phrases:
+                target = norm(phrase).split()
+                for i in range(len(items) - len(target) + 1):
+                    if [items[j][1] for j in range(i, i + len(target))] == target:
+                        return (
+                            center(items[i][0]) + center(items[i + len(target) - 1][0])
+                        ) / 2
+            return None
+
+        def token_x(tokens):
+            xs = [center(w) for w, n in items if any(t in n for t in tokens)]
+            return min(xs) if xs else None
+
+        return {
+            "date": phrase_x(["post date", "transaction date", "txn date"])
+                    or token_x(["date"]),
+            "value": phrase_x(["value date"]) or token_x(["value"]),
+            "narr": token_x(["description", "narration", "particular", "details", "remarks"]),
+            "ref": phrase_x(["reference", "ref no", "cheque no", "transaction id", "txn id", "utr"])
+                   or token_x(["reference", "ref", "cheque", "utr"]),
+            "debit": token_x(["debit", "withdrawal", "withdraw"]),
+            "credit": token_x(["credit", "deposit"]),
+            "balance": phrase_x(["closing balance"]) or token_x(["balance"]),
+        }
+
+    def assign_column(x, centers):
+        """Assign by midpoint boundaries, not nearest-center distance."""
+        ordered = sorted(
+            [(k, v) for k, v in centers.items() if v is not None],
+            key=lambda kv: kv[1]
+        )
+        if not ordered:
+            return None
+        for i, (name, cx) in enumerate(ordered):
+            left = -float("inf") if i == 0 else (ordered[i - 1][1] + cx) / 2
+            right = float("inf") if i == len(ordered) - 1 else (cx + ordered[i + 1][1]) / 2
+            if left <= x < right:
+                return name
+        return ordered[-1][0]
+
+    def parse_amounts(words, centers):
+        buckets = {k: [] for k in centers}
+        for w in words:
+            raw = str(w[4]).replace("₹", "").strip()
+            if amount_re.fullmatch(raw):
+                key = assign_column(center(w), centers)
+                if key in buckets:
+                    buckets[key].append((w[0], raw))
+
+        def last_money(key):
+            vals = buckets.get(key, [])
+            for _, raw in reversed(vals):
+                value = money(raw)
+                if pd.notna(value):
+                    return abs(value)
+            return np.nan
+
+        return last_money("debit"), last_money("credit"), last_money("balance")
 
     for page_no, page in enumerate(doc, 1):
         words = page.get_text("words")
@@ -382,16 +463,20 @@ def _native_pdf_position_rows(data):
         for w in words:
             lines.setdefault(ykey(w), []).append(w)
 
+        # Locate the transaction header on this page.
         header = None
         header_score = -1
         for y, ws in lines.items():
-            text = " ".join(w[4] for w in sorted(ws, key=lambda z: z[0]))
-            n = norm(text)
-            score = sum(k in n for k in [
-                "date", "value date", "description", "narration",
-                "particular", "reference", "debit", "credit",
-                "withdrawal", "deposit", "balance"
-            ])
+            text_line = " ".join(w[4] for w in clean_words(ws))
+            n = norm(text_line)
+            score = sum(
+                term in n
+                for term in [
+                    "date", "value date", "description", "narration",
+                    "particular", "reference", "debit", "credit",
+                    "withdrawal", "deposit", "balance"
+                ]
+            )
             if score > header_score and score >= 3:
                 header_score = score
                 header = (y, ws)
@@ -399,121 +484,125 @@ def _native_pdf_position_rows(data):
         if header is None:
             continue
 
-        hws = sorted(header[1], key=lambda z: z[0])
-        htext = " ".join(w[4] for w in hws)
-        hn = norm(htext)
-
-        def center(w):
-            return (w[0] + w[2]) / 2
-
-        def find_x(patterns):
-            candidates = []
-            for w in hws:
-                n = norm(w[4])
-                if any(p in n for p in patterns):
-                    candidates.append(center(w))
-            return min(candidates) if candidates else None
-
-        x_date = find_x(["post date", "transaction date", "txn date", "date"])
-        x_value = find_x(["value date"])
-        x_narr = find_x(["description", "narration", "particular", "details", "remarks"])
-        x_ref = find_x(["reference", "ref no", "cheque no", "utr", "txn id", "transaction id"])
-        x_debit = find_x(["debit", "withdrawal", "withdraw"])
-        x_credit = find_x(["credit", "deposit"])
-        x_balance = find_x(["balance", "closing balance"])
-
-        if x_date is None or x_narr is None or x_balance is None:
+        centers = header_x_positions(header[1])
+        if centers["date"] is None or centers["balance"] is None:
+            continue
+        if centers["debit"] is None and centers["credit"] is None:
+            # A statement without explicit amount columns is not safe to map.
             continue
 
-        columns = [
-            ("date", x_date), ("value", x_value), ("narr", x_narr),
-            ("ref", x_ref), ("debit", x_debit), ("credit", x_credit),
-            ("balance", x_balance)
-        ]
-        columns = [(k, x) for k, x in columns if x is not None]
-
-        def nearest_column(x):
-            return min(columns, key=lambda item: abs(item[1] - x))[0]
-
         for y, ws in sorted(lines.items()):
-            if y <= header[0] + 2:
-                continue
-            ws = sorted(ws, key=lambda z: z[0])
-            line_text = " ".join(w[4] for w in ws).strip()
-            if not line_text:
+            if y <= header[0] + 3:
                 continue
 
-            dm = re.search(r"\\b(\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4})\\b", line_text)
+            ws = clean_words(ws)
+            line_text = " ".join(w[4] for w in ws).strip()
+            if not line_text or not date_re.search(line_text):
+                continue
+
+            # Ignore repeated column headers / footer lines.
+            if sum(term in norm(line_text) for term in ["date", "narration", "description", "debit", "credit", "balance"]) >= 3:
+                continue
+
+            buckets = {k: [] for k in centers}
+            for w in ws:
+                key = assign_column(center(w), centers)
+                if key:
+                    buckets[key].append(w[4])
+
+            date_text = " ".join(buckets.get("date", []))
+            dm = date_re.search(date_text) or date_re.search(line_text)
             if not dm:
                 continue
 
-            buckets = {k: [] for k, _ in columns}
-            for w in ws:
-                key = nearest_column(center(w))
-                buckets[key].append(w[4])
-
-            date_text = " ".join(buckets.get("date", []))
-            date_match = re.search(r"\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}", date_text)
-            if not date_match:
-                date_match = dm
             date_value = pd.to_datetime(
-                date_match.group(0).replace(".", "-").replace("/", "-"),
-                dayfirst=True, errors="coerce"
+                dm.group(0).replace(".", "-").replace("/", "-"),
+                dayfirst=True,
+                errors="coerce",
             )
             if pd.isna(date_value):
                 continue
 
-            def amount_from(key):
-                vals = buckets.get(key, [])
-                for v in reversed(vals):
-                    z = money(v)
-                    if pd.notna(z):
-                        return abs(z)
+            def amount_from_bucket(key):
+                values = buckets.get(key, [])
+                for raw in reversed(values):
+                    value = money(raw)
+                    if pd.notna(value):
+                        return abs(value)
                 return np.nan
 
-            debit_value = amount_from("debit")
-            credit_value = amount_from("credit")
-            balance_value = amount_from("balance")
+            debit_value = amount_from_bucket("debit")
+            credit_value = amount_from_bucket("credit")
+            balance_value = amount_from_bucket("balance")
 
             narr_value = " ".join(buckets.get("narr", [])).strip()
             ref_value = " ".join(buckets.get("ref", [])).strip()
+
             value_date = pd.NaT
-            if x_value is not None:
-                vt = " ".join(buckets.get("value", []))
-                vm = re.search(r"\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}", vt)
-                if vm:
-                    value_date = pd.to_datetime(vm.group(0).replace(".", "-").replace("/", "-"), dayfirst=True, errors="coerce")
+            value_text = " ".join(buckets.get("value", []))
+            vm = date_re.search(value_text)
+            if vm:
+                value_date = pd.to_datetime(
+                    vm.group(0).replace(".", "-").replace("/", "-"),
+                    dayfirst=True,
+                    errors="coerce",
+                )
 
             if not narr_value:
                 narr_value = line_text
 
+            # Some banks place CR/DR beside the transaction amount.
+            upper_line = line_text.upper()
             if pd.isna(debit_value) and pd.isna(credit_value):
-                # Some statements use a single amount column with CR/DR suffix.
-                upper = line_text.upper()
-                amt = amount_from("balance")
-                if amt and re.search(r"\\bDR\\b", upper):
-                    debit_value = amt
-                elif amt and re.search(r"\\bCR\\b", upper):
-                    credit_value = amt
+                non_balance_numbers = []
+                for w in ws:
+                    raw = str(w[4]).replace("₹", "").strip()
+                    if amount_re.fullmatch(raw):
+                        x = center(w)
+                        key = assign_column(x, centers)
+                        if key not in {"balance", "date", "value"}:
+                            z = money(raw)
+                            if pd.notna(z):
+                                non_balance_numbers.append((x, abs(z), raw))
+                if len(non_balance_numbers) == 1:
+                    amt = non_balance_numbers[0][1]
+                    if re.search(r"\bDR\b", upper_line):
+                        debit_value = amt
+                    elif re.search(r"\bCR\b", upper_line):
+                        credit_value = amt
 
-            frames.append(pd.DataFrame([{
-                "Date": date_value,
-                "Value_Date": value_date,
-                "Narration": narr_value,
-                "Reference": ref_value,
-                "Debit": debit_value,
-                "Credit": credit_value,
-                "Balance": balance_value,
-                "Source_Page": page_no
-            }]))
+            frames.append(
+                pd.DataFrame(
+                    [{
+                        "Date": date_value,
+                        "Value_Date": value_date,
+                        "Narration": narr_value,
+                        "Reference": ref_value,
+                        "Debit": debit_value,
+                        "Credit": credit_value,
+                        "Balance": balance_value,
+                        "Source_Page": page_no,
+                    }]
+                )
+            )
 
     if not frames:
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+
+    result = pd.concat(frames, ignore_index=True)
+
+    # Remove exact repeated rows caused by a header/layout repeat.
+    result = result.drop_duplicates(
+        subset=["Date", "Narration", "Debit", "Credit", "Balance", "Source_Page"],
+        keep="first",
+    ).reset_index(drop=True)
+
+    return result
 
 
 def analyze_pdf(data, name):
     import fitz
+
     doc = fitz.open(stream=data, filetype="pdf")
     pages = len(doc)
     texts = [p.get_text("text") for p in doc]
@@ -523,15 +612,18 @@ def analyze_pdf(data, name):
     if ratio < 0.5:
         raise ValueError(
             f"{pages}-page PDF appears scanned/image-based ({nonempty} pages contain extractable text). "
-            "This version accepts native/digital PDFs; scanned PDFs require OCR before reliable forensic extraction."
+            "Scanned PDFs require OCR reconstruction before reliable forensic extraction."
         )
 
-    df = _native_pdf_tables(data)
-    extraction_method = "Native PDF table extraction"
+    # Fast path: use PDF word coordinates first. This preserves the real Debit/Credit
+    # column instead of letting narration numbers become transaction amounts.
+    df = _native_pdf_position_rows(data)
+    extraction_method = "Native PDF column-position extraction"
 
     if df.empty:
-        df = _native_pdf_position_rows(data)
-        extraction_method = "Native PDF column-position extraction"
+        # Slower generic table extraction is only a fallback.
+        df = _native_pdf_tables(data)
+        extraction_method = "Native PDF table extraction"
 
     if df.empty:
         raise ValueError(
@@ -539,16 +631,19 @@ def analyze_pdf(data, name):
             "No rows were invented."
         )
 
-    # Remove obvious repeated headers and rows without a usable date.
     df = df[df["Date"].notna()].copy()
     if df.empty:
         raise ValueError("PDF extraction produced no reliable dated transaction rows.")
 
-    amount_presence = df[["Debit", "Credit", "Balance"]].notna().any(axis=1).mean()
-    if amount_presence < 0.60:
+    # Do not accept a PDF merely because Balance was extracted. Require actual
+    # transaction movement to be present on a meaningful share of rows.
+    movement_presence = df[["Debit", "Credit"]].notna().any(axis=1).mean()
+    balance_presence = df["Balance"].notna().mean()
+
+    if movement_presence < 0.60 and balance_presence < 0.60:
         raise ValueError(
-            f"PDF extraction confidence is too low ({amount_presence:.0%} of rows contain a monetary field). "
-            "The source layout needs a bank-specific parser; analysis was stopped to protect evidence integrity."
+            f"PDF extraction confidence is too low ({movement_presence:.0%} rows contain Debit/Credit; "
+            f"{balance_presence:.0%} contain Balance). No values were invented."
         )
 
     if "Source_Page" not in df:
@@ -562,10 +657,11 @@ def analyze_pdf(data, name):
         "location": f"{pages} pages",
         "layout_confidence": extraction_method,
         "warnings": [
-            "Native PDF rows retain Source_Page for evidence tracing.",
-            "Scanned/image PDFs are stopped rather than converted into guessed transactions."
-        ]
+            "Native PDF amounts are mapped from PDF column positions.",
+            "Source_Page is retained for evidence tracing.",
+        ],
     }
+
     return {"transactions": df, "flags": flags, "meta": meta}
 
 
@@ -698,12 +794,12 @@ def _format_workbook(wb):
         for row in ws.iter_rows():
             for cell in row:
                 cell.font=Font(name="Bookman Old Style",size=10,bold=False)
-                cell.alignment=Alignment(vertical="top",wrap_text=True)
+                cell.alignment=Alignment(vertical="top",wrap_text=False)
                 cell.border=border
                 cell.fill=PatternFill(fill_type=None)
         for cell in ws[1]:
             cell.font=Font(name="Bookman Old Style",size=10,bold=True)
-            cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
+            cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=False)
             cell.border=border
             cell.fill=PatternFill(fill_type=None)
         headers={str(x.value):x.column for x in ws[1] if x.value is not None}
@@ -724,7 +820,7 @@ def _format_workbook(wb):
                         if x.value is None or (isinstance(x.value,str) and not x.value.strip()): x.value="-"
         for col_cells in ws.columns:
             vals=[str(x.value) if x.value is not None else "" for x in col_cells[:250]]
-            ws.column_dimensions[get_column_letter(col_cells[0].column)].width=min(max(max([len(v) for v in vals]+[10])+2,12),48)
+            ws.column_dimensions[get_column_letter(col_cells[0].column)].width=min(max(max([len(v) for v in vals]+[10])+2,12),70)
         for row in ws.iter_rows():
             if row and str(row[0].value or "") in section_names:
                 for cell in row:
