@@ -408,6 +408,29 @@ with tabs[3]:
 
 
 # ============================================================
+# MASTER ANALYSIS
+# ============================================================
+
+with tabs[4]:
+
+    st.subheader("🧠 Master Forensic Analysis")
+    st.caption("Concise evidence-led findings for investigative review.")
+
+    master, fund_flow, concentration, dq, provenance = build_master_analysis(df)
+
+    st.dataframe(master, use_container_width=True, height=500)
+
+    st.markdown("#### Fund-Flow Review")
+    if fund_flow.empty:
+        st.success("No configured large-credit / onward-debit pattern identified.")
+    else:
+        st.dataframe(fund_flow.head(60), use_container_width=True, height=360)
+
+    st.markdown("#### Data Quality")
+    st.dataframe(dq, use_container_width=True, height=280)
+
+
+# ============================================================
 # EXPORT
 # ============================================================
 
