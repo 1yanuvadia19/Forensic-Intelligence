@@ -882,7 +882,7 @@ def _ocr_pdf_position_rows(data):
     doc=fitz.open(stream=data,filetype="pdf")
     frames=[]
     for page_no,page in enumerate(doc,1):
-        pix=page.get_pixmap(matrix=fitz.Matrix(2,2),alpha=False)
+        pix=page.get_pixmap(matrix=fitz.Matrix(1.35,1.35),alpha=False)
         img=Image.frombytes("RGB",[pix.width,pix.height],pix.samples)
         od=pytesseract.image_to_data(img,config="--psm 6",output_type=pytesseract.Output.DICT)
         words=[]
@@ -937,10 +937,10 @@ def analyze_pdf(data,name):
     doc=fitz.open(stream=data,filetype="pdf")
     pages=len(doc); texts=[p.get_text("text") for p in doc]
     nonempty=sum(bool(t.strip()) for t in texts); ratio=nonempty/pages if pages else 0
-    extraction="Native PDF table extraction"
-    df=_native_pdf_tables(data) if ratio>=0.5 else pd.DataFrame()
+    extraction="Native PDF column-position extraction"
+    df=_native_pdf_position_rows(data) if ratio>=0.5 else pd.DataFrame()
     if df.empty and ratio>=0.5:
-        df=_native_pdf_position_rows(data); extraction="Native PDF column-position extraction"
+        df=_native_pdf_tables(data); extraction="Native PDF table extraction"
     if df.empty:
         extraction="OCR scanned-PDF extraction"
         try: df=_ocr_pdf_position_rows(data)
