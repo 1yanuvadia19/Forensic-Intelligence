@@ -1051,7 +1051,7 @@ def _format_workbook(wb):
 
 def build_workbook(df, flags, meta):
     out=io.BytesIO()
-    export_df=df.drop(columns=["Counterparty"],errors="ignore").copy()
+    export_df=df.copy()
     credits=export_df["Credit"].fillna(0); debits=export_df["Debit"].fillna(0)
     master,fund_flow,concentration,dq,_=build_master_analysis(df)
     summary=pd.DataFrame({"Metric":["Source","Period","Transactions","Total Credits","Total Debits","Net Flow","Review","Critical","Balance Mismatches"],"Value":[meta.get("source_type","-"),meta.get("location","-"),len(export_df),credits.sum(),debits.sum(),credits.sum()-debits.sum(),int((export_df.Priority=="REVIEW").sum()),int((export_df.Priority=="CRITICAL").sum()),balance_mismatches(df)]})
