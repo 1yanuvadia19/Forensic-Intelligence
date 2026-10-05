@@ -1,4 +1,4 @@
-# FORENSIC INTELLIGENCE 360° — MASTER BLASTER v2
+# FORENSIC INTELLIGENCE — MASTER BLASTER v2
 
 This build was created from the supplied benchmark evidence:
 - DHIREN AJAKIYA SBI SUMMARY - done.xlsx (8,416 transaction rows)
