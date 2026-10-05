@@ -118,7 +118,7 @@ with st.sidebar:
     st.markdown("### Pipeline")
 
     pipeline = [
-        "1. Detect layout",
+        "1. Extraction reliability",
         "2. Extract transactions",
         "3. Identify payment rails",
         "4. Screen anomalies",
