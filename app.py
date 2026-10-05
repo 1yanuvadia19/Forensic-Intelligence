@@ -208,7 +208,6 @@ tabs = st.tabs(
         "🎯 Command Center",
         "📋 Transactions",
         "🚨 Risk",
-        "👤 Counterparties",
         "📑 Annexures",
         "🧠 Master Analysis",
         "📤 Export",
@@ -376,53 +375,10 @@ with tabs[2]:
 
 
 # ============================================================
-# COUNTERPARTIES
-# ============================================================
-
-with tabs[3]:
-
-    st.subheader("Counterparty Intelligence")
-
-    if "Counterparty" not in df.columns:
-
-        st.info(
-            "Counterparty information is not available "
-            "for this evidence."
-        )
-
-    else:
-
-        cp = (
-            df[
-                df["Counterparty"]
-                .fillna("")
-                .ne("")
-            ]
-            .groupby("Counterparty")
-            .agg(
-                Transactions=("Narration", "size"),
-                Credits=("Credit", "sum"),
-                Debits=("Debit", "sum"),
-            )
-            .sort_values(
-                "Credits",
-                ascending=False,
-            )
-            .reset_index()
-        )
-
-        st.dataframe(
-            cp,
-            use_container_width=True,
-            height=600,
-        )
-
-
-# ============================================================
 # ANNEXURES
 # ============================================================
 
-with tabs[4]:
+with tabs[3]:
 
     st.subheader("Investigation Annexures")
 
@@ -455,7 +411,7 @@ with tabs[4]:
 # EXPORT
 # ============================================================
 
-with tabs[6]:
+with tabs[5]:
 
     st.subheader("Evidence-Ready Export")
     st.caption("Download the concise investigation workbook or executive forensic report.")
