@@ -342,7 +342,7 @@ def _native_pdf_tables(data):
     return pd.concat(frames, ignore_index=True)
 
 
-def _native_pdf_text_rows(data):
+def _native_pdf_text_rows(data, progress_callback=None):
     import fitz
     doc = fitz.open(stream=data, filetype="pdf")
     records = []
@@ -907,6 +907,70 @@ def analyze_upload(data, name, progress_callback=None):
         return analyze_excel(data, name)
     raise ValueError("Unsupported file type. Upload XLSX, XLS, CSV, or PDF.")
 
+
+
+
+def balance_check(df, tolerance=0.01):
+    """Reconcile reported balance against previous balance + credit - debit.
+
+    Blank Debit/Credit values remain unknown. Such rows are marked
+    INCOMPLETE rather than treating blanks as zero. This prevents extraction
+    gaps from creating artificial red balance errors.
+    """
+    x = df.copy().reset_index(drop=True)
+
+    for c in ["Debit", "Credit", "Balance"]:
+        x[c] = pd.to_numeric(x[c], errors="coerce")
+
+    rows = []
+    previous_balance = np.nan
+
+    for i, r in x.iterrows():
+        reported = r["Balance"]
+        debit = r["Debit"]
+        credit = r["Credit"]
+
+        if pd.isna(reported):
+            status = "NO REPORTED BALANCE"
+            expected = np.nan
+            difference = np.nan
+        elif pd.isna(previous_balance):
+            # First usable balance establishes the opening reference.
+            expected = reported
+            difference = 0.0
+            status = "OPENING / REFERENCE"
+        elif pd.isna(debit) or pd.isna(credit):
+            expected = np.nan
+            difference = np.nan
+            status = "INCOMPLETE — DEBIT/CREDIT UNKNOWN"
+        else:
+            expected = previous_balance + credit - debit
+            difference = reported - expected
+            status = "MATCH" if abs(difference) <= tolerance else "MISMATCH"
+
+        rows.append({
+            "Source_Row": r.get("Source_Row", i + 1),
+            "Source_Page": r.get("Source_Page", ""),
+            "Date": r.get("Date", pd.NaT),
+            "Debit": debit,
+            "Credit": credit,
+            "Reported_Balance": reported,
+            "Expected_Balance": expected,
+            "Difference": difference,
+            "Status": status,
+        })
+
+        if pd.notna(reported):
+            previous_balance = reported
+
+    return pd.DataFrame(rows)
+
+
+def balance_mismatches(df, tolerance=0.01):
+    check = balance_check(df, tolerance=tolerance)
+    if check.empty:
+        return 0
+    return int((check["Status"] == "MISMATCH").sum())
 
 
 def build_master_analysis(df):
