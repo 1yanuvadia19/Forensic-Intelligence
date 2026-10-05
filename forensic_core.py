@@ -417,6 +417,114 @@ def analyze_upload(data, name):
     raise ValueError("Unsupported file type. Upload XLSX, XLS, CSV, or PDF.")
 
 
+
+def build_master_analysis(df):
+    """Evidence-led master analytics. Flags are review priorities, never fraud conclusions."""
+    x = df.copy()
+    debit = x["Debit"].fillna(0)
+    credit = x["Credit"].fillna(0)
+    amount = debit + credit
+
+    positive = amount[amount > 0]
+    q95 = positive.quantile(.95) if len(positive) else np.nan
+    q99 = positive.quantile(.99) if len(positive) else np.nan
+
+    round_mask = (amount >= 50000) & (amount.mod(10000).eq(0))
+    high_mask = amount >= (q99 if pd.notna(q99) else np.inf)
+    cash_mask = x["Payment_Rail"].eq("ATM/CASH")
+    unknown_mask = x["Payment_Rail"].eq("OTHER / UNIDENTIFIED")
+
+    day_counts = x.groupby(x["Date"].dt.date)["Narration"].transform("size")
+    velocity_mask = day_counts >= 15
+
+    dup_key = (
+        x["Date"].astype(str) + "|" +
+        x["Narration"].fillna("").astype(str) + "|" +
+        debit.round(2).astype(str) + "|" +
+        credit.round(2).astype(str)
+    )
+    duplicate_mask = dup_key.duplicated(keep=False) & x["Date"].notna()
+
+    master_rows = [
+        ["Transaction volume", len(x), "Entire evidence set", "Factual scope", "INFORMATIONAL"],
+        ["Period covered", f"{x['Date'].min().strftime('%d-%m-%Y') if x['Date'].notna().any() else '-'} to {x['Date'].max().strftime('%d-%m-%Y') if x['Date'].notna().any() else '-'}", "Transaction dates", "Coverage", "INFORMATIONAL"],
+        ["Total credits", credit.sum(), "Credit column", "Funds received", "INFORMATIONAL"],
+        ["Total debits", debit.sum(), "Debit column", "Funds paid/out", "INFORMATIONAL"],
+        ["Net flow", credit.sum() - debit.sum(), "Credits minus debits", "Aggregate flow", "INFORMATIONAL"],
+        ["Top 1% amount transactions", int(high_mask.sum()), f"Threshold ₹{q99:,.2f}" if pd.notna(q99) else "Unavailable", "High-value review", "REVIEW"],
+        ["Top 5% amount transactions", int((amount >= q95).sum()) if pd.notna(q95) else 0, f"Threshold ₹{q95:,.2f}" if pd.notna(q95) else "Unavailable", "High-value review", "REVIEW"],
+        ["Rapid same/next-day onward movements", int(x["Rapid_Movement"].sum()), "Credit followed by >=80% debit within 1 day", "Fund-flow review", "REVIEW"],
+        ["Large round-value transactions", int(round_mask.sum()), ">= ₹50,000 and multiple of ₹10,000", "Pattern review", "REVIEW"],
+        ["High transaction-velocity rows", int(velocity_mask.sum()), "15+ transactions on same date", "Activity-pattern review", "REVIEW"],
+        ["Potential duplicate rows", int(duplicate_mask.sum()), "Same date + narration + debit + credit", "Data-quality review", "REVIEW"],
+        ["Cash/ATM activity", int(cash_mask.sum()), "Payment rail classification", "Cash-flow review", "REVIEW"],
+        ["Unidentified payment rail", int(unknown_mask.sum()), "Narration did not expose a known rail", "Data-quality only; not suspicious by itself", "DATA QUALITY"],
+        ["Balance mismatches", balance_mismatches(x), "Sequential balance reconciliation", "Evidence integrity", "CRITICAL" if balance_mismatches(x) else "PASS"],
+    ]
+    master = pd.DataFrame(master_rows, columns=["Finding", "Value", "Basis", "Interpretation", "Review_Status"])
+
+    # Fund-flow review: large credits followed by substantial debits within 24 hours.
+    ff = []
+    credits = x[credit > 0]
+    debits = x[debit > 0]
+    for ci, cr in credits.iterrows():
+        if cr["Credit"] < 100000 or pd.isna(cr["Date"]):
+            continue
+        candidates = debits[
+            (debits["Date"] >= cr["Date"]) &
+            (debits["Date"] <= cr["Date"] + pd.Timedelta(days=1)) &
+            (debits["Debit"] >= cr["Credit"] * 0.8)
+        ]
+        for di, dr in candidates.iterrows():
+            ff.append({
+                "Credit_Date": cr["Date"], "Credit_Amount": cr["Credit"],
+                "Credit_Narration": cr["Narration"], "Credit_Source_Row": cr.get("Source_Row", ""),
+                "Debit_Date": dr["Date"], "Debit_Amount": dr["Debit"],
+                "Debit_Narration": dr["Narration"], "Debit_Source_Row": dr.get("Source_Row", ""),
+                "Movement_Ratio": round(dr["Debit"] / cr["Credit"], 4) if cr["Credit"] else np.nan,
+                "Review_Reason": "Large credit followed by substantial debit within 1 day"
+            })
+    fund_flow = pd.DataFrame(ff)
+
+    # Counterparty concentration.
+    cp = x[x["Counterparty"].fillna("").ne("")].copy()
+    if len(cp):
+        concentration = cp.groupby("Counterparty").agg(
+            Transactions=("Narration", "size"),
+            Credits=("Credit", "sum"),
+            Debits=("Debit", "sum"),
+            First_Date=("Date", "min"),
+            Last_Date=("Date", "max")
+        ).reset_index()
+        total_credit = concentration["Credits"].fillna(0).sum()
+        total_debit = concentration["Debits"].fillna(0).sum()
+        concentration["Credit_Share"] = concentration["Credits"].fillna(0) / total_credit if total_credit else 0
+        concentration["Debit_Share"] = concentration["Debits"].fillna(0) / total_debit if total_debit else 0
+        concentration["Net_Flow"] = concentration["Credits"].fillna(0) - concentration["Debits"].fillna(0)
+        concentration = concentration.sort_values(["Credits", "Debits"], ascending=False).reset_index(drop=True)
+    else:
+        concentration = pd.DataFrame(columns=["Counterparty","Transactions","Credits","Debits","First_Date","Last_Date","Credit_Share","Debit_Share","Net_Flow"])
+
+    # Data quality and provenance.
+    dq = pd.DataFrame([
+        ["Rows extracted", len(x), "Total normalized transactions"],
+        ["Missing transaction date", int(x["Date"].isna().sum()), "Date not extracted"],
+        ["Missing both debit and credit", int((debit.eq(0) & credit.eq(0)).sum()), "No monetary movement recorded"],
+        ["Missing reported balance", int(x["Balance"].isna().sum()), "Balance unavailable in source"],
+        ["Unidentified rail", int(unknown_mask.sum()), "Classification limitation; not a fraud finding"],
+        ["Potential duplicate rows", int(duplicate_mask.sum()), "Requires source verification"],
+        ["Balance mismatches", balance_mismatches(x), "Sequential reconciliation"],
+    ], columns=["Data_Quality_Item","Count","Meaning"])
+
+    provenance_cols = [c for c in ["Source_Sheet","Source_Page","Source_Row"] if c in x.columns]
+    if provenance_cols:
+        provenance = x.groupby(provenance_cols, dropna=False).size().reset_index(name="Extracted_Transactions")
+    else:
+        provenance = pd.DataFrame()
+
+    return master, fund_flow, concentration, dq, provenance
+
+
 def _format_workbook(wb):
     from openpyxl.styles import Font, Alignment, PatternFill
     from openpyxl.utils import get_column_letter
@@ -489,6 +597,7 @@ def build_workbook(df, flags, meta):
 
     credits = df["Credit"].fillna(0)
     debits = df["Debit"].fillna(0)
+    master, fund_flow, concentration, dq, provenance = build_master_analysis(df)
 
     summary = pd.DataFrame({
         "Metric": [
@@ -498,8 +607,8 @@ def build_workbook(df, flags, meta):
         "Value": [
             meta["source_type"], meta["location"], len(df), credits.sum(), debits.sum(),
             credits.sum() - debits.sum(),
-            (df.Priority == "REVIEW").sum(),
-            (df.Priority == "CRITICAL").sum(),
+            int((df.Priority == "REVIEW").sum()),
+            int((df.Priority == "CRITICAL").sum()),
             balance_mismatches(df)
         ]
     })
@@ -524,12 +633,12 @@ def build_workbook(df, flags, meta):
         cats.to_excel(w, index=False, sheet_name="05_Categories")
 
         if "Counterparty" in df:
-            cp = df[df.Counterparty.fillna("") != ""].groupby("Counterparty").agg(
+            cp_old = df[df.Counterparty.fillna("") != ""].groupby("Counterparty").agg(
                 Transactions=("Narration", "size"),
                 Credits=("Credit", "sum"),
                 Debits=("Debit", "sum")
             ).sort_values("Credits", ascending=False).reset_index()
-            cp.to_excel(w, index=False, sheet_name="06_Counterparties")
+            cp_old.to_excel(w, index=False, sheet_name="06_Counterparties")
 
         monthly = df.copy()
         monthly["Month"] = monthly["Date"].dt.to_period("M").astype(str)
@@ -540,15 +649,22 @@ def build_workbook(df, flags, meta):
         ).reset_index().to_excel(w, index=False, sheet_name="07_Monthly_Flow")
 
         balance_check(df).to_excel(w, index=False, sheet_name="08_Balance_Check")
+        master.to_excel(w, index=False, sheet_name="09_Master_Analysis")
+        fund_flow.to_excel(w, index=False, sheet_name="10_Fund_Flow_Review")
+        concentration.to_excel(w, index=False, sheet_name="11_Counterparty_Concentration")
+        dq.to_excel(w, index=False, sheet_name="12_Data_Quality")
+        provenance.to_excel(w, index=False, sheet_name="13_Evidence_Provenance")
         pd.DataFrame({
             "Note": [
-                "Generated from source evidence; verify flagged items against the original statement before forensic use.",
+                "MASTER FORENSIC ANALYSIS: findings are evidence-led review priorities, not conclusions of fraud or illegality.",
                 f"Layout confidence: {meta.get('layout_confidence', '-')}",
                 "Missing numeric values are preserved as blank/NaN; they are never silently converted to zero.",
                 "Header rows are bold and intentionally unfrozen.",
-                "Workbook font: Bookman Old Style. Dates: dd-mm-yyyy. Monetary fields: Indian ₹ accounting."
+                "Workbook font: Bookman Old Style. Dates: dd-mm-yyyy. Monetary fields: Indian ₹ accounting.",
+                "Unknown payment rail is a data-quality limitation and is not treated as suspicious by itself.",
+                "Every material review finding should be verified against the original bank statement before investigative use."
             ]
-        }).to_excel(w, index=False, sheet_name="09_Notes")
+        }).to_excel(w, index=False, sheet_name="14_Notes")
 
         _format_workbook(w.book)
 
