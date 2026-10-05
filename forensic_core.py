@@ -545,12 +545,13 @@ def _native_pdf_position_rows(data, progress_callback=None):
             continue
 
         for y, ws in sorted(lines.items()):
-            if y <= header[0] + 3:
-                continue
-
+            # Continuation pages can contain valid transactions ABOVE the
+            # repeated column header. Do not discard those rows by Y-position.
+            # A genuine transaction row must begin with a date; this excludes
+            # footer/header metadata such as "BANK OF BARODA Date :17-03-2026".
             ws = clean_words(ws)
             line_text = " ".join(w[4] for w in ws).strip()
-            if not line_text or not date_re.search(line_text):
+            if not re.match(r"^\s*\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b", line_text):
                 continue
 
             # Ignore repeated column headers / footer lines.
