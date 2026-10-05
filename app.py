@@ -385,13 +385,10 @@ with tabs[3]:
     st.subheader("Investigation Annexures")
 
     annexure_options = [
+        "Executive Summary",
         "Normalised Transactions",
-        "Review Queue",
-        "Payment Rails",
-        "Categories",
-        "Counterparties",
-        "Monthly Flow",
-        "Balance Check",
+        "Flow Analysis",
+        "Master Analysis",
     ]
 
     st.write(
