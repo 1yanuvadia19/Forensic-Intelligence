@@ -460,8 +460,14 @@ def _native_pdf_position_rows(data, progress_callback=None):
                     or token_x(["date"]),
             "value": phrase_x(["value date"]) or token_x(["value"]),
             "narr": token_x(["description", "narration", "particular", "details", "remarks"]),
-            "ref": phrase_x(["reference", "ref no", "cheque no", "transaction id", "txn id", "utr"])
-                   or token_x(["reference", "ref", "cheque", "utr"]),
+            # Bank statements commonly label this column as CHQ.NO. / CHQ NO.
+            # It must be recognized explicitly; otherwise the cheque number can sit
+            # just inside the Debit boundary and be falsely extracted as a monetary
+            # withdrawal (the exact failure seen in the Bank of Baroda benchmark).
+            "ref": phrase_x([
+                "reference", "ref no", "cheque no", "chq no", "chq.no",
+                "transaction id", "txn id", "utr"
+            ]) or token_x(["reference", "ref", "cheque", "chq", "utr"]),
             "debit": token_x(["debit", "withdrawal", "withdraw"]),
             "credit": token_x(["credit", "deposit"]),
             "balance": phrase_x(["closing balance"]) or token_x(["balance"]),
