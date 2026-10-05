@@ -1,0 +1,9 @@
+FORENSIC INTELLIGENCE 360° — MASTER BLASTER v2
+
+ONE-CLICK:
+Double-click START_FORENSIC_TOOL.vbs
+
+No manual Command Prompt commands are required.
+
+Benchmark files are in CASE_BENCHMARKS.
+Do not commit confidential case files or API keys to GitHub.
