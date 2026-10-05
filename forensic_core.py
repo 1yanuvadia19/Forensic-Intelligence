@@ -347,6 +347,8 @@ def _native_pdf_text_rows(data):
     doc = fitz.open(stream=data, filetype="pdf")
     records = []
     for page_no, page in enumerate(doc, 1):
+        if progress_callback:
+            progress_callback(page_no, len(doc), f"Extracting digital PDF page {page_no}/{len(doc)}")
         words = page.get_text("words")
         if not words:
             continue
@@ -410,7 +412,7 @@ def _native_pdf_text_rows(data):
 
 
 
-def _native_pdf_position_rows(data):
+def _native_pdf_position_rows(data, progress_callback=None):
     """Extract native/digital bank PDFs using header x-positions and row-level column boundaries.
 
     Important: amounts are assigned from their actual PDF x-position.  We do not
@@ -646,7 +648,7 @@ def _native_pdf_position_rows(data):
 
 
 
-def _ocr_pdf_position_rows(data):
+def _ocr_pdf_position_rows(data, progress_callback=None):
     """OCR scanned bank PDFs into conservative transaction rows.
 
     The OCR path reconstructs the table from page coordinates. It does not
@@ -712,6 +714,8 @@ def _ocr_pdf_position_rows(data):
         return None
 
     for page_no, page in enumerate(doc, 1):
+        if progress_callback:
+            progress_callback(page_no, len(doc), f"OCR scanning page {page_no}/{len(doc)}")
         pix = page.get_pixmap(matrix=fitz.Matrix(1.15, 1.15), alpha=False)
         image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
@@ -821,7 +825,7 @@ def _ocr_pdf_position_rows(data):
     return result
 
 
-def analyze_pdf(data, name):
+def analyze_pdf(data, name, progress_callback=None):
     import fitz
 
     doc = fitz.open(stream=data, filetype="pdf")
@@ -830,9 +834,12 @@ def analyze_pdf(data, name):
     nonempty = sum(bool(t.strip()) for t in texts)
     ratio = nonempty / pages if pages else 0
 
+    if progress_callback:
+        progress_callback(0, max(pages, 1), "Detecting PDF type and layout")
+
     if ratio < 0.5:
         # Scanned/image PDF: use the real OCR reconstruction path.
-        df = _ocr_pdf_position_rows(data)
+        df = _ocr_pdf_position_rows(data, progress_callback=progress_callback)
         extraction_method = "OCR table reconstruction"
         if df.empty:
             raise ValueError(
@@ -841,7 +848,7 @@ def analyze_pdf(data, name):
             )
     else:
         # Digital/native PDF: use coordinate-aware extraction first.
-        df = _native_pdf_position_rows(data)
+        df = _native_pdf_position_rows(data, progress_callback=progress_callback)
         extraction_method = "Native PDF column-position extraction"
         if df.empty:
             df = _native_pdf_tables(data)
@@ -851,6 +858,9 @@ def analyze_pdf(data, name):
                 "Digital PDF detected, but the transaction columns could not be mapped reliably. "
                 "No rows were invented."
             )
+
+    if progress_callback:
+        progress_callback(pages, max(pages, 1), "Validating extracted transactions")
 
     df = df[df["Date"].notna()].copy()
     if df.empty:
@@ -869,6 +879,9 @@ def analyze_pdf(data, name):
     if "Source_Page" not in df:
         df["Source_Page"] = np.nan
 
+    if progress_callback:
+        progress_callback(pages, max(pages, 1), "Running forensic classification and validation")
+
     df = enrich(df)
     flags = df[df.Priority.isin(["REVIEW", "CRITICAL"])].copy()
 
@@ -886,10 +899,10 @@ def analyze_pdf(data, name):
 
     return {"transactions": df, "flags": flags, "meta": meta}
 
-def analyze_upload(data, name):
+def analyze_upload(data, name, progress_callback=None):
     ext = Path(name).suffix.lower()
     if ext == ".pdf":
-        return analyze_pdf(data, name)
+        return analyze_pdf(data, name, progress_callback=progress_callback)
     if ext in {".xlsx", ".xls", ".csv"}:
         return analyze_excel(data, name)
     raise ValueError("Unsupported file type. Upload XLSX, XLS, CSV, or PDF.")
