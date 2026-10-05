@@ -205,6 +205,8 @@ else:
 
         st.session_state.analysis_result = result
         st.session_state.analysis_hash = file_hash
+        st.session_state.derived_hash = None
+        st.session_state.derived_analysis = None
         st.session_state.export_hash = None
         st.session_state.export_workbook = None
         st.session_state.export_pdf = None
@@ -251,6 +253,15 @@ else:
 df = result["transactions"].copy()
 flags = result["flags"].copy()
 meta = result["meta"].copy()
+
+# Cache derived analytics for the current evidence hash. This prevents
+# expensive pandas analysis from running again on every widget interaction.
+if st.session_state.get("derived_hash") != file_hash:
+    with st.spinner("Preparing forensic analytics…"):
+        st.session_state.derived_analysis = build_master_analysis(df)
+        st.session_state.derived_hash = file_hash
+
+master_cached, fund_flow_cached, concentration_cached, dq_cached, provenance_cached = st.session_state.derived_analysis
 
 
 # ============================================================
@@ -376,8 +387,11 @@ if tabs[1].open:
             f"Showing {len(view):,} transaction(s)"
         )
 
+        display_view = view.head(5000)
+        if len(view) > 5000:
+            st.caption("Showing the first 5,000 matching rows for performance. Export contains the full evidence set.")
         st.dataframe(
-            view,
+            display_view,
             use_container_width=True,
             height=600,
         )
@@ -428,8 +442,11 @@ if tabs[2].open:
 
         else:
 
+            display_flags = flags.head(5000)
+            if len(flags) > 5000:
+                st.caption("Showing the first 5,000 review rows for performance. Export contains the full evidence set.")
             st.dataframe(
-                flags,
+                display_flags,
                 use_container_width=True,
                 height=600,
             )
@@ -476,7 +493,7 @@ if tabs[4].open:
         st.subheader("🧠 Master Forensic Analysis")
         st.caption("Concise evidence-led findings for investigative review.")
 
-        master, fund_flow, concentration, dq, provenance = build_master_analysis(df)
+        master, fund_flow, concentration, dq, provenance = master_cached, fund_flow_cached, concentration_cached, dq_cached, provenance_cached
 
         st.dataframe(master, use_container_width=True, height=500)
 
@@ -500,7 +517,7 @@ if tabs[5].open:
         st.subheader("🤖 Forensic AI Assistant")
         st.caption("Ask questions about the analysed evidence, patterns and review priorities.")
 
-        master_ai, fund_ai, cp_ai, dq_ai, prov_ai = build_master_analysis(df)
+        master_ai, fund_ai, cp_ai, dq_ai, prov_ai = master_cached, fund_flow_cached, concentration_cached, dq_cached, provenance_cached
 
         question = st.text_area(
             "Ask the forensic assistant",
