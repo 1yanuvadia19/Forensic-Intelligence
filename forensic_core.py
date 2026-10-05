@@ -593,11 +593,23 @@ def _format_workbook(wb):
 
 
 def build_workbook(df, flags, meta):
+    """Create a concise, investigation-ready 9-sheet workbook."""
     out = io.BytesIO()
-
     credits = df["Credit"].fillna(0)
     debits = df["Debit"].fillna(0)
-    master, fund_flow, concentration, dq, provenance = build_master_analysis(df)
+
+    master, _, _, dq, _ = build_master_analysis(df)
+
+    # Keep Master Analysis concise: only decision-useful findings.
+    master = master[
+        master["Finding"].isin([
+            "Transaction volume", "Period covered", "Total credits", "Total debits",
+            "Net flow", "Top 1% amount transactions", "Top 5% amount transactions",
+            "Rapid same/next-day onward movements", "Large round-value transactions",
+            "High transaction-velocity rows", "Potential duplicate rows",
+            "Cash/ATM activity", "Unidentified payment rail", "Balance mismatches"
+        ])
+    ].copy()
 
     summary = pd.DataFrame({
         "Metric": [
@@ -625,52 +637,35 @@ def build_workbook(df, flags, meta):
         Debits=("Debit", "sum")
     ).reset_index()
 
+    cp = df[df["Counterparty"].fillna("").ne("")].groupby("Counterparty").agg(
+        Transactions=("Narration", "size"),
+        Credits=("Credit", "sum"),
+        Debits=("Debit", "sum")
+    ).sort_values("Credits", ascending=False).reset_index()
+
+    monthly = df.copy()
+    monthly["Month"] = monthly["Date"].dt.to_period("M").astype(str)
+    monthly = monthly.groupby("Month", dropna=False).agg(
+        Transactions=("Narration", "size"),
+        Credits=("Credit", "sum"),
+        Debits=("Debit", "sum")
+    ).reset_index()
+
     with pd.ExcelWriter(out, engine="openpyxl") as w:
         summary.to_excel(w, index=False, sheet_name="01_Summary")
         df.to_excel(w, index=False, sheet_name="02_Normalised_Transactions")
         flags.to_excel(w, index=False, sheet_name="03_Review_Queue")
         rails.to_excel(w, index=False, sheet_name="04_Payment_Rails")
         cats.to_excel(w, index=False, sheet_name="05_Categories")
-
-        if "Counterparty" in df:
-            cp_old = df[df.Counterparty.fillna("") != ""].groupby("Counterparty").agg(
-                Transactions=("Narration", "size"),
-                Credits=("Credit", "sum"),
-                Debits=("Debit", "sum")
-            ).sort_values("Credits", ascending=False).reset_index()
-            cp_old.to_excel(w, index=False, sheet_name="06_Counterparties")
-
-        monthly = df.copy()
-        monthly["Month"] = monthly["Date"].dt.to_period("M").astype(str)
-        monthly.groupby("Month", dropna=False).agg(
-            Transactions=("Narration", "size"),
-            Credits=("Credit", "sum"),
-            Debits=("Debit", "sum")
-        ).reset_index().to_excel(w, index=False, sheet_name="07_Monthly_Flow")
-
+        cp.to_excel(w, index=False, sheet_name="06_Counterparties")
+        monthly.to_excel(w, index=False, sheet_name="07_Monthly_Flow")
         balance_check(df).to_excel(w, index=False, sheet_name="08_Balance_Check")
         master.to_excel(w, index=False, sheet_name="09_Master_Analysis")
-        fund_flow.to_excel(w, index=False, sheet_name="10_Fund_Flow_Review")
-        concentration.to_excel(w, index=False, sheet_name="11_Counterparty_Concentration")
-        dq.to_excel(w, index=False, sheet_name="12_Data_Quality")
-        provenance.to_excel(w, index=False, sheet_name="13_Evidence_Provenance")
-        pd.DataFrame({
-            "Note": [
-                "MASTER FORENSIC ANALYSIS: findings are evidence-led review priorities, not conclusions of fraud or illegality.",
-                f"Layout confidence: {meta.get('layout_confidence', '-')}",
-                "Missing numeric values are preserved as blank/NaN; they are never silently converted to zero.",
-                "Header rows are bold and intentionally unfrozen.",
-                "Workbook font: Bookman Old Style. Dates: dd-mm-yyyy. Monetary fields: Indian ₹ accounting.",
-                "Unknown payment rail is a data-quality limitation and is not treated as suspicious by itself.",
-                "Every material review finding should be verified against the original bank statement before investigative use."
-            ]
-        }).to_excel(w, index=False, sheet_name="14_Notes")
 
         _format_workbook(w.book)
 
     out.seek(0)
     return out.getvalue()
-
 
 def balance_check(df):
     rows = []
