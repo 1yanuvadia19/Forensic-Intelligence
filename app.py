@@ -210,7 +210,6 @@ tabs = st.tabs(
         "🚨 Risk",
         "👤 Counterparties",
         "📑 Annexures",
-        "🧠 Master Analysis",
         "📤 Export",
     ]
 )
@@ -452,75 +451,17 @@ with tabs[4]:
 
 
 # ============================================================
-# MASTER ANALYSIS
+# EXPORT
 # ============================================================
 
 with tabs[5]:
 
-    st.subheader("🧠 Master Forensic Analysis")
-
-    master, fund_flow, concentration, dq, provenance = build_master_analysis(df)
-
-    st.info(
-        "This is an evidence-led decision-support layer. "
-        "Review/Critical means investigative priority only — it does not establish fraud, illegality or intent."
-    )
-
-    st.markdown("### Executive Findings")
-    st.dataframe(master, use_container_width=True, height=520)
-
-    st.markdown("### Fund-Flow Review")
-    st.caption("Large credits followed by substantial debits within one day. Verify against the original evidence.")
-    if fund_flow.empty:
-        st.success("No configured large-credit / onward-debit pattern was identified.")
-    else:
-        st.dataframe(fund_flow, use_container_width=True, height=420)
-
-    st.markdown("### Counterparty Concentration")
-    if concentration.empty:
-        st.info("No counterparty concentration table could be formed from the extracted evidence.")
-    else:
-        st.dataframe(concentration.head(100), use_container_width=True, height=420)
-
-    st.markdown("### Data Quality")
-    st.dataframe(dq, use_container_width=True, height=300)
-
-    st.markdown("### Evidence Provenance")
-    if provenance.empty:
-        st.info("No source provenance fields were available.")
-    else:
-        st.dataframe(provenance.head(200), use_container_width=True, height=350)
-
-
-# ============================================================
-# EXPORT
-# ============================================================
-
-with tabs[6]:
-
     st.subheader("Evidence-Ready Export")
 
-    st.write(
-        "Generate the forensic Excel workbook with:"
+    st.caption(
+        "Concise 9-sheet forensic workbook • evidence-first • investigation-ready"
     )
 
-    st.markdown(
-        """
-        - **Bookman Old Style** throughout
-        - Bold, **unfrozen** header row
-        - `dd-mm-yyyy` date format
-        - Indian ₹ accounting format
-        - Missing textual values shown as `-`
-        - Filters and professional column widths
-        - Normalised transactions
-        - Review queue
-        - Payment rails
-        - Categories
-        - Counterparties
-        - Monthly flow
-        - Balance reconciliation
-        """
-    )
 
     try:
 
