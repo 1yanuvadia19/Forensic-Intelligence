@@ -945,12 +945,19 @@ def balance_check(df, tolerance=0.01):
             expected = reported
             difference = 0.0
             status = "OPENING / REFERENCE"
-        elif pd.isna(debit) or pd.isna(credit):
+        elif pd.isna(debit) and pd.isna(credit):
+            # Both movement columns are blank: the source does not provide a
+            # usable movement amount for this row, so reconciliation is incomplete.
             expected = np.nan
             difference = np.nan
             status = "INCOMPLETE — DEBIT/CREDIT UNKNOWN"
         else:
-            expected = previous_balance + credit - debit
+            # Bank statements normally leave the opposite side blank:
+            # a credit row has Debit blank, and a debit row has Credit blank.
+            # For reconciliation only, that structural blank is zero movement.
+            debit_value = 0.0 if pd.isna(debit) else float(debit)
+            credit_value = 0.0 if pd.isna(credit) else float(credit)
+            expected = previous_balance + credit_value - debit_value
             difference = reported - expected
             status = "MATCH" if abs(difference) <= tolerance else "MISMATCH"
 
@@ -1135,6 +1142,10 @@ def _format_workbook(wb):
 def build_workbook(df, flags, meta):
     out=io.BytesIO()
     export_df=df.copy()
+    # Source_Page is retained internally for evidence tracing, but it is not
+    # part of the user's requested transaction export.
+    if "Source_Page" in export_df.columns:
+        export_df=export_df.drop(columns=["Source_Page"])
     credits=export_df["Credit"].fillna(0); debits=export_df["Debit"].fillna(0)
     master,fund_flow,concentration,dq,_=build_master_analysis(df)
     summary=pd.DataFrame({"Metric":["Source","Period","Transactions","Total Credits","Total Debits","Net Flow","Review","Critical","Balance Mismatches"],"Value":[meta.get("source_type","-"),meta.get("location","-"),len(export_df),credits.sum(),debits.sum(),credits.sum()-debits.sum(),int((export_df.Priority=="REVIEW").sum()),int((export_df.Priority=="CRITICAL").sum()),balance_mismatches(df)]})
