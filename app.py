@@ -210,6 +210,7 @@ tabs = st.tabs(
         "🚨 Risk",
         "👤 Counterparties",
         "📑 Annexures",
+        "🧠 Master Analysis",
         "📤 Export",
     ]
 )
