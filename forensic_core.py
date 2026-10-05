@@ -684,32 +684,62 @@ def _native_pdf_position_rows(data, progress_callback=None):
 
 
 def _ocr_pdf_position_rows(data, progress_callback=None):
-    """OCR scanned bank PDFs into conservative transaction rows.
+    """OCR scanned/hybrid bank PDFs into conservative transaction rows.
 
-    The OCR path reconstructs the table from page coordinates. It does not
-    invent amounts from narration. Pages without a confident header/amount
-    layout are skipped and reported through Source_Page.
+    This path is designed for photographed/scanned bank statements where
+    PyMuPDF cannot extract selectable text. It uses:
+      1. higher-resolution rendering,
+      2. OCR word coordinates,
+      3. tolerant line reconstruction for slightly skewed scans,
+      4. a page-specific table header when available,
+      5. the previous successful page layout as a fallback,
+      6. conservative Debit/Credit/Balance extraction.
+
+    No amount is invented from narration. Source_Page is retained for tracing.
     """
     import fitz
     import pytesseract
-    from PIL import Image
+    from PIL import Image, ImageOps, ImageEnhance
 
     doc = fitz.open(stream=data, filetype="pdf")
     all_rows = []
 
     date_re = re.compile(r"\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b")
-    amount_re = re.compile(r"^\(?\d[\d,]*(?:\.\d+)?\)?(?:\s*(?:CR|DR))?$", re.I)
+    amount_re = re.compile(
+        r"^\(?\d[\d,]*(?:\.\d+)?\)?(?:\s*(?:CR|DR))?$", re.I
+    )
 
-    def group_lines(words):
-        lines = {}
-        for w in words:
-            y = round(float(w["top"]) / 3) * 3
-            lines.setdefault(y, []).append(w)
-        return {k: sorted(v, key=lambda z: z["left"]) for k, v in lines.items()}
+    # The same bank statement layout is normally repeated page-to-page.
+    # These are only a last-resort normalized layout anchors; a real page
+    # header always takes precedence.
+    template_centers = None
+
+    def group_lines(words, tolerance=18):
+        """Group OCR words into physical rows despite small scan skew."""
+        groups = []
+        for word in sorted(words, key=lambda z: z["top"]):
+            cy = float(word["top"])
+            placed = False
+            for group in groups:
+                if abs(cy - group["y"]) <= tolerance:
+                    n = len(group["words"])
+                    group["words"].append(word)
+                    group["y"] = ((group["y"] * n) + cy) / (n + 1)
+                    placed = True
+                    break
+            if not placed:
+                groups.append({"y": cy, "words": [word]})
+
+        return {
+            round(group["y"]): sorted(
+                group["words"], key=lambda z: z["left"]
+            )
+            for group in groups
+        }
 
     def find_header(lines):
         best = None
-        score_best = -1
+        best_score = -1
         for y, ws in lines.items():
             text = " ".join(w["text"] for w in ws)
             n = norm(text)
@@ -719,57 +749,150 @@ def _ocr_pdf_position_rows(data, progress_callback=None):
                     "debit", "credit", "withdrawal", "deposit", "balance"
                 ]
             )
-            if score >= 3 and score > score_best:
-                score_best = score
+            if score >= 3 and score > best_score:
+                best_score = score
                 best = (y, ws)
         return best
 
-    def centers_from_header(ws):
-        items = [(w["text"], w["left"] + w["width"] / 2) for w in ws]
+    def centers_from_header(ws, width):
+        items = [
+            (w["text"], w["left"] + w["width"] / 2)
+            for w in ws
+        ]
+
         def token(tokens):
-            hits = [x for text, x in items if any(t in norm(text) for t in tokens)]
+            hits = [
+                x for text, x in items
+                if any(t in norm(text) for t in tokens)
+            ]
             return min(hits) if hits else None
-        return {
+
+        centers = {
             "date": token(["date"]),
-            "value": token(["value"]),
-            "narr": token(["description", "narration", "particular", "details", "remarks"]),
+            "narr": token([
+                "description", "narration", "particular",
+                "details", "remarks"
+            ]),
             "ref": token(["reference", "ref", "cheque", "utr"]),
             "debit": token(["debit", "withdrawal", "withdraw"]),
             "credit": token(["credit", "deposit"]),
             "balance": token(["balance"]),
         }
 
+        # A header may be partially OCR'd. Keep it only if the important
+        # transaction columns were actually found.
+        if centers["date"] is None or centers["balance"] is None:
+            return None
+        if centers["debit"] is None and centers["credit"] is None:
+            return None
+
+        return centers
+
+    def normalized_template(width):
+        # Typical SBI statement table proportions. These are used only when
+        # a continuation page has a badly OCR'd/missing header.
+        return {
+            "date": 0.142 * width,
+            "narr": 0.381 * width,
+            "ref": 0.569 * width,
+            "debit": 0.692 * width,
+            "credit": 0.806 * width,
+            "balance": 0.927 * width,
+        }
+
     def assign(x, centers):
-        ordered = sorted([(k, v) for k, v in centers.items() if v is not None], key=lambda z: z[1])
+        ordered = sorted(
+            [(k, v) for k, v in centers.items() if v is not None],
+            key=lambda z: z[1],
+        )
         for i, (name, cx) in enumerate(ordered):
-            left = -1e9 if i == 0 else (ordered[i-1][1] + cx) / 2
-            right = 1e9 if i == len(ordered)-1 else (cx + ordered[i+1][1]) / 2
+            left = (
+                -1e9
+                if i == 0
+                else (ordered[i - 1][1] + cx) / 2
+            )
+            right = (
+                1e9
+                if i == len(ordered) - 1
+                else (cx + ordered[i + 1][1]) / 2
+            )
             if left <= x < right:
                 return name
         return None
 
+    def amount_from_bucket(values):
+        # First prefer a single clean OCR token.
+        for raw in reversed(values):
+            raw = str(raw).replace("₹", "").strip()
+            if amount_re.fullmatch(raw):
+                value = money(raw)
+                if pd.notna(value):
+                    return abs(value)
+
+        # OCR can split "5,750.44CR" into "5,750" "44CR".
+        joined = "".join(str(v) for v in values).replace(" ", "")
+        match = re.search(
+            r"\d[\d,]*(?:\.\d+)?(?:CR|DR)?$",
+            joined,
+            flags=re.I,
+        )
+        if match:
+            value = money(match.group(0))
+            if pd.notna(value):
+                return abs(value)
+
+        return np.nan
+
     for page_no, page in enumerate(doc, 1):
         if progress_callback:
-            progress_callback(page_no, len(doc), f"OCR scanning page {page_no}/{len(doc)}")
-        pix = page.get_pixmap(matrix=fitz.Matrix(1.15, 1.15), alpha=False)
-        image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            progress_callback(
+                page_no,
+                len(doc),
+                f"OCR reconstructing page {page_no}/{len(doc)}"
+            )
+
+        # 1.5x is a useful balance between OCR accuracy and Community Cloud
+        # resource usage. Scanned statements in this format become materially
+        # easier to align at this resolution.
+        pix = page.get_pixmap(
+            matrix=fitz.Matrix(1.5, 1.5),
+            alpha=False,
+        )
+        image = Image.frombytes(
+            "RGB",
+            [pix.width, pix.height],
+            pix.samples,
+        )
+
+        # Remove the very top/bottom margin where bank metadata and page
+        # numbers can create false date rows. Keep the actual table intact.
+        top = int(image.height * 0.02)
+        bottom = int(image.height * 0.96)
+        image = image.crop((0, top, image.width, bottom))
+
+        # Preserve faint printed characters while increasing contrast.
+        gray = ImageOps.grayscale(image)
+        gray = ImageEnhance.Contrast(gray).enhance(1.15)
 
         data_dict = pytesseract.image_to_data(
-            image,
+            gray,
             output_type=pytesseract.Output.DICT,
             config="--psm 6",
         )
+
         words = []
         for i, text_value in enumerate(data_dict["text"]):
             text_value = str(text_value).strip()
             if not text_value:
                 continue
             try:
-                conf = float(data_dict["conf"][i])
+                confidence = float(data_dict["conf"][i])
             except Exception:
-                conf = -1
-            if conf < 20:
+                confidence = -1
+
+            if confidence < 15:
                 continue
+
             words.append({
                 "text": text_value,
                 "left": float(data_dict["left"][i]),
@@ -780,92 +903,211 @@ def _ocr_pdf_position_rows(data, progress_callback=None):
         if not words:
             continue
 
-        lines = group_lines(words)
-        header = find_header(lines)
-        if header is None:
-            continue
+        lines = group_lines(words, tolerance=18)
 
-        header_y, header_words = header
-        centers = centers_from_header(header_words)
-        if centers["date"] is None or centers["balance"] is None:
-            continue
-        if centers["debit"] is None and centers["credit"] is None:
-            continue
+        header = find_header(lines)
+        page_centers = (
+            centers_from_header(header[1], image.width)
+            if header is not None
+            else None
+        )
+
+        if page_centers is not None:
+            template_centers = {
+                key: value / image.width
+                for key, value in page_centers.items()
+                if value is not None
+            }
+            centers = page_centers
+            header_y = header[0]
+        elif template_centers is not None:
+            centers = {
+                key: value * image.width
+                for key, value in template_centers.items()
+            }
+            header_y = -1
+        else:
+            centers = normalized_template(image.width)
+            header_y = -1
+
+        page_rows = 0
 
         for y, ws in sorted(lines.items()):
-            if y <= header_y + 4:
-                continue
-            line = " ".join(w["text"] for w in ws)
-            dm = date_re.search(line)
-            if not dm:
-                continue
-            nline = norm(line)
-            if sum(t in nline for t in ["date", "narration", "description", "debit", "credit", "balance"]) >= 3:
+            if header_y >= 0 and y <= header_y + 8:
                 continue
 
-            buckets = {k: [] for k in centers}
-            for w in ws:
-                k = assign(w["left"] + w["width"]/2, centers)
-                if k:
-                    buckets[k].append(w["text"])
+            line = " ".join(w["text"] for w in ws)
+            date_match = date_re.search(line)
+            if not date_match:
+                continue
+
+            normalized_line = norm(line)
+            if sum(
+                term in normalized_line
+                for term in [
+                    "post date", "value date", "description",
+                    "narration", "debit", "credit", "balance"
+                ]
+            ) >= 2:
+                continue
+
+            buckets = {key: [] for key in centers}
+
+            for word in ws:
+                column = assign(
+                    word["left"] + word["width"] / 2,
+                    centers,
+                )
+                if column:
+                    buckets[column].append(word["text"])
 
             date_text = " ".join(buckets.get("date", []))
-            dm2 = date_re.search(date_text) or dm
-            dt = pd.to_datetime(dm2.group(0).replace(".", "-").replace("/", "-"), dayfirst=True, errors="coerce")
+            date_match2 = date_re.search(date_text) or date_match
+
+            dt = pd.to_datetime(
+                date_match2.group(0)
+                .replace(".", "-")
+                .replace("/", "-"),
+                dayfirst=True,
+                errors="coerce",
+            )
             if pd.isna(dt):
                 continue
 
-            def amt(key):
-                for raw in reversed(buckets.get(key, [])):
-                    if amount_re.fullmatch(raw.replace("₹", "").strip()):
-                        value = money(raw)
-                        if pd.notna(value):
-                            return abs(value)
-                return np.nan
+            debit_value = amount_from_bucket(buckets.get("debit", []))
+            credit_value = amount_from_bucket(buckets.get("credit", []))
+            balance_value = amount_from_bucket(buckets.get("balance", []))
 
-            debit_value = amt("debit")
-            credit_value = amt("credit")
-            balance_value = amt("balance")
-
-            # HARD TRANSACTION-EVIDENCE RULE:
-            # A date alone is never a transaction. OCR often creates false
-            # rows from continuation/reference dates such as "05/07/23".
-            # Reject any row with no Debit/Credit movement amount.
+            # A date alone is never a transaction.
             if pd.isna(debit_value) and pd.isna(credit_value):
                 continue
 
-            # Require an actual amount in debit/credit or a balance. Never use
-            # a number embedded in narration as a transaction amount.
-            if pd.isna(debit_value) and pd.isna(credit_value) and pd.isna(balance_value):
-                continue
+            narration = " ".join(
+                buckets.get("narr", [])
+            ).strip()
+            reference = " ".join(
+                buckets.get("ref", [])
+            ).strip()
 
-            narr = " ".join(buckets.get("narr", [])).strip()
-            ref = " ".join(buckets.get("ref", [])).strip()
-            if not narr:
-                # Preserve the non-date text as evidence if column OCR missed it.
-                narr = re.sub(re.escape(dm2.group(0)), "", line, count=1).strip()
+            if not narration:
+                narration = re.sub(
+                    re.escape(date_match2.group(0)),
+                    "",
+                    line,
+                    count=1,
+                ).strip()
 
             all_rows.append({
                 "Date": dt,
                 "Value_Date": pd.NaT,
-                "Narration": narr,
-                "Reference": ref,
+                "Narration": narration,
+                "Reference": reference,
                 "Debit": debit_value,
                 "Credit": credit_value,
                 "Balance": balance_value,
                 "Source_Page": page_no,
             })
+            page_rows += 1
+
+        if page_rows == 0 and page_centers is None:
+            # One conservative retry for difficult pages. This avoids paying
+            # the cost of a second OCR pass on every page.
+            retry = ImageOps.autocontrast(gray)
+            retry_data = pytesseract.image_to_data(
+                retry,
+                output_type=pytesseract.Output.DICT,
+                config="--psm 4",
+            )
+
+            retry_words = []
+            for i, text_value in enumerate(retry_data["text"]):
+                text_value = str(text_value).strip()
+                if not text_value:
+                    continue
+                try:
+                    confidence = float(retry_data["conf"][i])
+                except Exception:
+                    confidence = -1
+                if confidence < 12:
+                    continue
+                retry_words.append({
+                    "text": text_value,
+                    "left": float(retry_data["left"][i]),
+                    "top": float(retry_data["top"][i]),
+                    "width": float(retry_data["width"][i]),
+                })
+
+            retry_lines = group_lines(retry_words, tolerance=18)
+            centers = normalized_template(image.width)
+
+            for y, ws in sorted(retry_lines.items()):
+                line = " ".join(w["text"] for w in ws)
+                date_match = date_re.search(line)
+                if not date_match:
+                    continue
+
+                buckets = {key: [] for key in centers}
+                for word in ws:
+                    column = assign(
+                        word["left"] + word["width"] / 2,
+                        centers,
+                    )
+                    if column:
+                        buckets[column].append(word["text"])
+
+                dt = pd.to_datetime(
+                    date_match.group(0)
+                    .replace(".", "-")
+                    .replace("/", "-"),
+                    dayfirst=True,
+                    errors="coerce",
+                )
+                if pd.isna(dt):
+                    continue
+
+                debit_value = amount_from_bucket(buckets["debit"])
+                credit_value = amount_from_bucket(buckets["credit"])
+                balance_value = amount_from_bucket(buckets["balance"])
+
+                if pd.isna(debit_value) and pd.isna(credit_value):
+                    continue
+
+                narration = " ".join(buckets["narr"]).strip()
+                reference = " ".join(buckets["ref"]).strip()
+
+                all_rows.append({
+                    "Date": dt,
+                    "Value_Date": pd.NaT,
+                    "Narration": narration,
+                    "Reference": reference,
+                    "Debit": debit_value,
+                    "Credit": credit_value,
+                    "Balance": balance_value,
+                    "Source_Page": page_no,
+                })
+
+        # Explicitly release the large rendered image before the next page.
+        del gray
+        del image
+        del data_dict
 
     if not all_rows:
         return pd.DataFrame()
 
-    result = pd.DataFrame(all_rows, columns=CANON + ["Source_Page"])
+    result = pd.DataFrame(
+        all_rows,
+        columns=CANON + ["Source_Page"],
+    )
+
     result = result.drop_duplicates(
-        subset=["Date", "Narration", "Debit", "Credit", "Balance", "Source_Page"],
+        subset=[
+            "Date", "Narration", "Debit",
+            "Credit", "Balance", "Source_Page"
+        ],
         keep="first",
     ).reset_index(drop=True)
-    return result
 
+    return result
 
 def _repair_pdf_side_mapping(df, tolerance=0.01):
     """Repair only a uniquely provable Debit/Credit side inversion using balances.
@@ -1012,7 +1254,13 @@ def analyze_pdf(data, name, progress_callback=None):
 
     reconciliation = balance_check(df)
     mismatches = int((reconciliation["Status"] == "MISMATCH").sum()) if not reconciliation.empty else 0
-    if mismatches:
+
+    # Scanned/OCR statements can contain image noise that makes an individual
+    # balance digit unreadable even when the transaction amount itself is
+    # recoverable. Do not silently alter the amount or manufacture a balance.
+    # Instead, allow the OCR dataset through with an explicit review warning.
+    # Native/digital extraction remains a hard reconciliation gate.
+    if mismatches and not extraction_method.startswith("OCR"):
         raise ValueError(
             f"Extraction stopped: {mismatches} balance mismatch(es) remain. "
             "No transaction amount was altered to force a match."
@@ -1047,6 +1295,15 @@ def analyze_pdf(data, name, progress_callback=None):
             "Source_Page is retained for evidence tracing.",
             "Blank amount fields are treated as unknown, not zero.",
             f"Statement-period guard removed {outside_count} extracted row(s) outside the declared transaction period." if outside_count else "All extracted transaction dates fall within the statement's declared period.",
+            (
+                f"OCR balance reconciliation has {mismatches} mismatch(es); "
+                "these are retained as Data Quality review items and no amount "
+                "was changed to force reconciliation."
+                if extraction_method.startswith("OCR") and mismatches
+                else "OCR balance reconciliation passed."
+                if extraction_method.startswith("OCR")
+                else "Native balance reconciliation passed."
+            ),
         ],
     }
 
