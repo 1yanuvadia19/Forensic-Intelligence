@@ -588,6 +588,27 @@ def _native_pdf_position_rows(data, progress_callback=None):
             credit_value = amount_from_bucket("credit")
             balance_value = amount_from_bucket("balance")
 
+            # One bank transaction cannot be exported with both movement sides.
+            if pd.notna(debit_value) and pd.notna(credit_value):
+                delta = np.nan
+                # Prefer the side whose amount agrees with the reported balance.
+                # If neither side agrees, reject the row instead of changing evidence.
+                if pd.notna(balance_value):
+                    prior = None
+                    if frames:
+                        prior = frames[-1].iloc[-1]["Balance"]
+                    if prior is not None and pd.notna(prior):
+                        delta = float(balance_value) - float(prior)
+                        dm = abs(delta + float(debit_value)) <= 0.01
+                        cm = abs(delta - float(credit_value)) <= 0.01
+                        if cm and not dm:
+                            debit_value = np.nan
+                        elif dm and not cm:
+                            credit_value = np.nan
+                        else:
+                            raise ValueError("Could not uniquely reconcile a row containing both Debit and Credit.")
+
+
             narr_value = " ".join(buckets.get("narr", [])).strip()
             ref_value = " ".join(buckets.get("ref", [])).strip()
 
