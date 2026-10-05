@@ -687,142 +687,81 @@ def build_master_analysis(df):
 
 
 def _format_workbook(wb):
-    from openpyxl.styles import Font, Alignment, PatternFill
+    from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
     from openpyxl.utils import get_column_letter
-    from openpyxl.worksheet.table import Table, TableStyleInfo
-
-    text_cols = {
-        "Narration", "Reference", "Counterparty", "Payment_Rail", "Category",
-        "Flag_Reason", "Priority", "Source_Sheet", "Source_Page", "Source_Row", "Note"
-    }
-
+    thin=Side(style="thin",color="B7B7B7")
+    border=Border(left=thin,right=thin,top=thin,bottom=thin)
+    section_names={"FUND-FLOW REVIEW","MONTHLY FLOW","DATA QUALITY","BALANCE RECONCILIATION"}
     for ws in wb.worksheets:
-        # Header must be bold but NOT frozen.
-        ws.freeze_panes = None
-        ws.auto_filter.ref = ws.dimensions
-
+        ws.freeze_panes=None
+        ws.auto_filter.ref=ws.dimensions
         for row in ws.iter_rows():
             for cell in row:
-                cell.font = Font(name="Bookman Old Style", size=10, bold=cell.row == 1)
-                cell.alignment = Alignment(
-                    vertical="top",
-                    wrap_text=True if cell.column >= 2 else False
-                )
-
+                cell.font=Font(name="Bookman Old Style",size=10,bold=False)
+                cell.alignment=Alignment(vertical="top",wrap_text=True)
+                cell.border=border
+                cell.fill=PatternFill(fill_type=None)
         for cell in ws[1]:
-            cell.font = Font(name="Bookman Old Style", size=10, bold=True)
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-        headers = {str(c.value): c.column for c in ws[1] if c.value is not None}
-        for h, col_idx in headers.items():
-            col = get_column_letter(col_idx)
-            hnorm = norm(h)
-            if hnorm in {"date", "value date"} or "date" in hnorm:
-                for c in ws.iter_cols(min_col=col_idx, max_col=col_idx, min_row=2):
-                    for cell in c:
-                        if cell.value is not None:
-                            cell.number_format = "dd-mm-yyyy"
-
-            if hnorm in {"debit", "credit", "balance", "expected", "reported", "difference", "credits", "debits", "net flow"} or any(k in hnorm for k in ["amount", "value"]):
-                for c in ws.iter_cols(min_col=col_idx, max_col=col_idx, min_row=2):
-                    for cell in c:
-                        if isinstance(cell.value, (int, float, np.integer, np.floating)) and not pd.isna(cell.value):
-                            cell.number_format = '₹ #,##0.00;[Red]-₹ #,##0.00;₹ -'
-
-            if h in text_cols or any(k in hnorm for k in ["narration", "description", "remarks", "reason", "counterparty", "category", "rail"]):
-                for c in ws.iter_cols(min_col=col_idx, max_col=col_idx, min_row=2):
-                    for cell in c:
-                        if cell.value is None or (isinstance(cell.value, str) and not cell.value.strip()):
-                            cell.value = "-"
-
-        # Professional widths.
+            cell.font=Font(name="Bookman Old Style",size=10,bold=True)
+            cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
+            cell.border=border
+            cell.fill=PatternFill(fill_type=None)
+        headers={str(x.value):x.column for x in ws[1] if x.value is not None}
+        for h,col_idx in headers.items():
+            hn=norm(h)
+            if "date" in hn:
+                for cells in ws.iter_cols(min_col=col_idx,max_col=col_idx,min_row=2):
+                    for x in cells:
+                        if x.value is not None: x.number_format="dd-mm-yyyy"
+            if hn in {"debit","credit","balance","expected","reported","difference","credits","debits","net flow"} or "amount" in hn:
+                for cells in ws.iter_cols(min_col=col_idx,max_col=col_idx,min_row=2):
+                    for x in cells:
+                        if isinstance(x.value,(int,float,np.integer,np.floating)) and not pd.isna(x.value):
+                            x.number_format='#,##0.00;[Red]-#,##0.00;-'
+            if any(k in hn for k in ["narration","description","remarks","reason","category","rail","reference"]):
+                for cells in ws.iter_cols(min_col=col_idx,max_col=col_idx,min_row=2):
+                    for x in cells:
+                        if x.value is None or (isinstance(x.value,str) and not x.value.strip()): x.value="-"
         for col_cells in ws.columns:
-            values = [str(c.value) if c.value is not None else "" for c in col_cells[:250]]
-            width = max([len(v) for v in values] + [10])
-            width = min(max(width + 2, 12), 48)
-            ws.column_dimensions[get_column_letter(col_cells[0].column)].width = width
-
-        # Add a filter/table without freezing panes.
-        if ws.max_row >= 2 and ws.max_column >= 1:
-            ref = f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
-            try:
-                tab = Table(displayName=f"T_{re.sub(r'[^A-Za-z0-9]', '', ws.title)[:20]}", ref=ref)
-                tab.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showFirstColumn=False, showLastColumn=False, showRowStripes=True, showColumnStripes=False)
-                ws.add_table(tab)
-            except Exception:
-                pass
-
+            vals=[str(x.value) if x.value is not None else "" for x in col_cells[:250]]
+            ws.column_dimensions[get_column_letter(col_cells[0].column)].width=min(max(max([len(v) for v in vals]+[10])+2,12),48)
+        for row in ws.iter_rows():
+            if row and str(row[0].value or "") in section_names:
+                for cell in row:
+                    cell.font=Font(name="Bookman Old Style",size=10,bold=True)
+                    cell.fill=PatternFill(fill_type=None)
+                    cell.border=border
 
 def build_workbook(df, flags, meta):
-    """Concise investigation workbook: only decision-useful schedules."""
-    out = io.BytesIO()
-    credits = df["Credit"].fillna(0)
-    debits = df["Debit"].fillna(0)
-    master, fund_flow, concentration, dq, _ = build_master_analysis(df)
-
-    # Compact 6-sheet structure.
-    summary = pd.DataFrame({
-        "Metric": [
-            "Source", "Period", "Transactions", "Total Credits", "Total Debits",
-            "Net Flow", "Review", "Critical", "Balance Mismatches"
-        ],
-        "Value": [
-            meta.get("source_type", "-"), meta.get("location", "-"), len(df),
-            credits.sum(), debits.sum(), credits.sum() - debits.sum(),
-            int((df.Priority == "REVIEW").sum()),
-            int((df.Priority == "CRITICAL").sum()),
-            balance_mismatches(df)
-        ]
-    })
-
-    flow = pd.concat([
-        df.groupby("Payment_Rail", dropna=False).agg(
-            Transactions=("Narration", "size"), Credits=("Credit", "sum"), Debits=("Debit", "sum")
-        ).reset_index().rename(columns={"Payment_Rail": "Analysis"}),
-        df.groupby("Category", dropna=False).agg(
-            Transactions=("Narration", "size"), Credits=("Credit", "sum"), Debits=("Debit", "sum")
-        ).reset_index().rename(columns={"Category": "Analysis"})
-    ], ignore_index=True)
-    flow.insert(0, "Section", ["Payment Rail"] * len(df.groupby("Payment_Rail", dropna=False)) +
-                ["Category"] * len(df.groupby("Category", dropna=False)))
-
-    monthly = df.copy()
-    monthly["Month"] = monthly["Date"].dt.to_period("M").astype(str)
-    monthly = monthly.groupby("Month", dropna=False).agg(
-        Transactions=("Narration", "size"), Credits=("Credit", "sum"), Debits=("Debit", "sum")
-    ).reset_index()
-
-    with pd.ExcelWriter(out, engine="openpyxl") as w:
-        summary.to_excel(w, index=False, sheet_name="01_Executive_Summary")
-        df.to_excel(w, index=False, sheet_name="02_Transactions")
-        flags.to_excel(w, index=False, sheet_name="03_Review_Queue")
-        flow.to_excel(w, index=False, sheet_name="04_Flow_Analysis")
-
-        # Counterparty concentration with only decision-useful fields.
-        concentration.to_excel(w, index=False, sheet_name="05_Counterparty_Analysis")
-
-        # One master sheet with concise findings + fund flow + monthly + data quality + balance.
-        master.to_excel(w, index=False, sheet_name="06_Master_Analysis")
-        row = len(master) + 4
-        pd.DataFrame({"Section": ["FUND-FLOW REVIEW"]}).to_excel(w, index=False, sheet_name="06_Master_Analysis", startrow=row-1)
+    out=io.BytesIO()
+    export_df=df.drop(columns=["Counterparty"],errors="ignore").copy()
+    credits=export_df["Credit"].fillna(0); debits=export_df["Debit"].fillna(0)
+    master,fund_flow,concentration,dq,_=build_master_analysis(df)
+    summary=pd.DataFrame({"Metric":["Source","Period","Transactions","Total Credits","Total Debits","Net Flow","Review","Critical","Balance Mismatches"],"Value":[meta.get("source_type","-"),meta.get("location","-"),len(export_df),credits.sum(),debits.sum(),credits.sum()-debits.sum(),int((export_df.Priority=="REVIEW").sum()),int((export_df.Priority=="CRITICAL").sum()),balance_mismatches(df)]})
+    rail=df.groupby("Payment_Rail",dropna=False).agg(Transactions=("Narration","size"),Credits=("Credit","sum"),Debits=("Debit","sum")).reset_index().rename(columns={"Payment_Rail":"Analysis"}); rail.insert(0,"Section","Payment Rail")
+    cat=df.groupby("Category",dropna=False).agg(Transactions=("Narration","size"),Credits=("Credit","sum"),Debits=("Debit","sum")).reset_index().rename(columns={"Category":"Analysis"}); cat.insert(0,"Section","Category")
+    flow=pd.concat([rail,cat],ignore_index=True)
+    with pd.ExcelWriter(out,engine="openpyxl") as w:
+        summary.to_excel(w,index=False,sheet_name="01_Executive_Summary")
+        export_df.to_excel(w,index=False,sheet_name="02_Transactions")
+        flow.to_excel(w,index=False,sheet_name="03_Flow_Analysis")
+        master.to_excel(w,index=False,sheet_name="04_Master_Analysis")
+        row=len(master)+3
+        pd.DataFrame({"Section":["FUND-FLOW REVIEW"]}).to_excel(w,index=False,sheet_name="04_Master_Analysis",startrow=row-1)
         if fund_flow.empty:
-            pd.DataFrame({"Result": ["No configured large-credit / onward-debit pattern identified."]}).to_excel(w, index=False, sheet_name="06_Master_Analysis", startrow=row)
+            pd.DataFrame({"Result":["No configured large-credit / onward-debit pattern identified."]}).to_excel(w,index=False,sheet_name="04_Master_Analysis",startrow=row); row+=4
         else:
-            fund_flow.head(100).to_excel(w, index=False, sheet_name="06_Master_Analysis", startrow=row)
-        row += max(len(fund_flow.head(100)), 1) + 3
-        pd.DataFrame({"Section": ["MONTHLY FLOW"]}).to_excel(w, index=False, sheet_name="06_Master_Analysis", startrow=row-1)
-        monthly.to_excel(w, index=False, sheet_name="06_Master_Analysis", startrow=row)
-        row += len(monthly) + 3
-        pd.DataFrame({"Section": ["DATA QUALITY"]}).to_excel(w, index=False, sheet_name="06_Master_Analysis", startrow=row-1)
-        dq.to_excel(w, index=False, sheet_name="06_Master_Analysis", startrow=row)
-        row += len(dq) + 3
-        pd.DataFrame({"Section": ["BALANCE RECONCILIATION"]}).to_excel(w, index=False, sheet_name="06_Master_Analysis", startrow=row-1)
-        balance_check(df).to_excel(w, index=False, sheet_name="06_Master_Analysis", startrow=row)
-
+            fund_flow.head(60).to_excel(w,index=False,sheet_name="04_Master_Analysis",startrow=row); row+=min(len(fund_flow),60)+3
+        monthly=df.copy(); monthly["Month"]=monthly["Date"].dt.to_period("M").astype(str)
+        monthly=monthly.groupby("Month",dropna=False).agg(Transactions=("Narration","size"),Credits=("Credit","sum"),Debits=("Debit","sum")).reset_index()
+        pd.DataFrame({"Section":["MONTHLY FLOW"]}).to_excel(w,index=False,sheet_name="04_Master_Analysis",startrow=row-1)
+        monthly.to_excel(w,index=False,sheet_name="04_Master_Analysis",startrow=row); row+=len(monthly)+3
+        pd.DataFrame({"Section":["DATA QUALITY"]}).to_excel(w,index=False,sheet_name="04_Master_Analysis",startrow=row-1)
+        dq.to_excel(w,index=False,sheet_name="04_Master_Analysis",startrow=row); row+=len(dq)+3
+        pd.DataFrame({"Section":["BALANCE RECONCILIATION"]}).to_excel(w,index=False,sheet_name="04_Master_Analysis",startrow=row-1)
+        balance_check(df).to_excel(w,index=False,sheet_name="04_Master_Analysis",startrow=row)
         _format_workbook(w.book)
-
-    out.seek(0)
-    return out.getvalue()
+    out.seek(0); return out.getvalue()
 
 
 def build_pdf_report(df, flags, meta, filename):
