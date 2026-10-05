@@ -96,7 +96,7 @@ with st.sidebar:
         type=["xlsx", "xls", "csv", "pdf"],
         help=(
             "Supported formats: Excel, CSV and bank-generated PDF. "
-            "Scanned PDFs are detected separately and require OCR."
+            "Scanned PDFs are automatically processed through OCR table reconstruction."
         ),
     )
 
@@ -149,8 +149,8 @@ if uploaded_file is None:
         - Excel `.xls`
         - CSV `.csv`
         - Native bank-generated PDF `.pdf`
-        - Scanned/image PDFs are detected and blocked until OCR
-          reconstruction is available.
+        - Scanned/image PDFs are automatically reconstructed using OCR with
+          page-level evidence tracing and validation.
 
         ### Evidence-first principle
 
