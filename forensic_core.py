@@ -872,6 +872,32 @@ def analyze_pdf(data, name, progress_callback=None):
     if df.empty:
         raise ValueError("PDF extraction produced no reliable dated transaction rows.")
 
+    # HARD EVIDENCE BOUNDARY:
+    # Bank PDFs often carry a later print/generation date in the footer
+    # (this statement was printed on 17-03-2026), while the actual transaction
+    # period is explicitly 01-01-2022 to 30-06-2023. Never allow a footer/header
+    # date to become a transaction date.
+    statement_period = re.search(
+        r"period of\\s+(\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4})\\s+to\\s+(\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4})",
+        "\\n".join(texts),
+        flags=re.I,
+    )
+    period_start = period_end = None
+    if statement_period:
+        period_start = pd.to_datetime(statement_period.group(1).replace(".", "-").replace("/", "-"), dayfirst=True, errors="coerce")
+        period_end = pd.to_datetime(statement_period.group(2).replace(".", "-").replace("/", "-"), dayfirst=True, errors="coerce")
+        if pd.notna(period_start) and pd.notna(period_end):
+            outside = (df["Date"] < period_start) | (df["Date"] > period_end)
+            outside_count = int(outside.sum())
+            df = df.loc[~outside].copy()
+        else:
+            outside_count = 0
+    else:
+        outside_count = 0
+
+    if df.empty:
+        raise ValueError("PDF extraction produced no transactions inside the statement's declared period.")
+
     movement_presence = df[["Debit", "Credit"]].notna().any(axis=1).mean()
     balance_presence = df["Balance"].notna().mean()
 
@@ -900,6 +926,7 @@ def analyze_pdf(data, name, progress_callback=None):
             "Debit/Credit values are accepted only from detected transaction columns.",
             "Source_Page is retained for evidence tracing.",
             "Blank amount fields are treated as unknown, not zero.",
+            f"Statement-period guard removed {outside_count} extracted row(s) outside the declared transaction period." if outside_count else "All extracted transaction dates fall within the statement's declared period.",
         ],
     }
 
