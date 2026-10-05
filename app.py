@@ -4,7 +4,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from forensic_core import analyze_upload, build_workbook, build_master_analysis
+from forensic_core import analyze_upload, build_workbook, build_master_analysis, build_pdf_report
 
 
 # ============================================================
@@ -454,44 +454,38 @@ with tabs[4]:
 # EXPORT
 # ============================================================
 
-with tabs[5]:
+with tabs[6]:
 
     st.subheader("Evidence-Ready Export")
-
-    st.caption(
-        "Concise 9-sheet forensic workbook • evidence-first • investigation-ready"
-    )
-
+    st.caption("Download the concise investigation workbook or executive forensic report.")
 
     try:
+        workbook = build_workbook(df, flags, meta)
+        pdf_report = build_pdf_report(df, flags, meta, file_name)
+        base = Path(file_name).stem
 
-        workbook = build_workbook(
-            df,
-            flags,
-            meta,
-        )
+        col1, col2 = st.columns(2)
 
-        output_name = (
-            Path(file_name).stem
-            + "_FORENSIC_INTELLIGENCE.xlsx"
-        )
+        with col1:
+            st.download_button(
+                label="⬇️ Excel Analysis",
+                data=workbook,
+                file_name=base + "_FORENSIC_INTELLIGENCE.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
 
-        st.download_button(
-            label="⬇️ Download Forensic Excel Workbook",
-            data=workbook,
-            file_name=output_name,
-            mime=(
-                "application/vnd.openxmlformats-officedocument."
-                "spreadsheetml.sheet"
-            ),
-            use_container_width=True,
-        )
+        with col2:
+            st.download_button(
+                label="⬇️ PDF Forensic Report",
+                data=pdf_report,
+                file_name=base + "_FORENSIC_REPORT.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
 
     except Exception as exc:
-
-        st.error(
-            f"Could not generate the forensic workbook: {exc}"
-        )
+        st.error(f"Could not generate the export: {exc}")
 
 
 # ============================================================
