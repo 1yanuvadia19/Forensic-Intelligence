@@ -933,6 +933,20 @@ def analyze_pdf(data, name, progress_callback=None):
     if df.empty:
         raise ValueError("PDF extraction produced no transactions inside the statement's declared period.")
 
+    # Final gate: never export a transaction set with dual-sided movement
+    # or unresolved sequential balance mismatches.
+    dual_side = df["Debit"].notna() & df["Credit"].notna()
+    if dual_side.any():
+        raise ValueError("Extraction stopped: at least one transaction contains both Debit and Credit.")
+
+    reconciliation = balance_check(df)
+    mismatches = int((reconciliation["Status"] == "MISMATCH").sum()) if not reconciliation.empty else 0
+    if mismatches:
+        raise ValueError(
+            f"Extraction stopped: {mismatches} balance mismatch(es) remain. "
+            "No transaction amount was altered to force a match."
+        )
+
     movement_presence = df[["Debit", "Credit"]].notna().any(axis=1).mean()
     balance_presence = df["Balance"].notna().mean()
 
