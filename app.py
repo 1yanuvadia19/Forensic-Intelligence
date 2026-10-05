@@ -1,4 +1,5 @@
 import io
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -210,6 +211,7 @@ tabs = st.tabs(
         "🚨 Risk",
         "📑 Annexures",
         "🧠 Master Analysis",
+        "🤖 AI Assistant",
         "📤 Export",
     ]
 )
@@ -431,10 +433,92 @@ with tabs[4]:
 
 
 # ============================================================
-# EXPORT
+# AI ASSISTANT
 # ============================================================
 
 with tabs[5]:
+
+    st.subheader("🤖 Forensic AI Assistant")
+    st.caption("Ask questions about the analysed evidence, patterns and review priorities.")
+
+    master_ai, fund_ai, cp_ai, dq_ai, prov_ai = build_master_analysis(df)
+
+    question = st.text_area(
+        "Ask the forensic assistant",
+        placeholder="Example: What are the most important findings in this statement?",
+        height=90,
+    )
+
+    if st.button("Analyse with AI", type="primary", use_container_width=True):
+        if not question.strip():
+            st.warning("Enter a question first.")
+        else:
+            api_key = os.getenv("OPENAI_API_KEY")
+            try:
+                if not api_key:
+                    try:
+                        api_key = st.secrets.get("OPENAI_API_KEY")
+                    except Exception:
+                        api_key = None
+
+                context = {
+                    "source": meta,
+                    "summary": master_ai.to_dict("records"),
+                    "top_review_rows": flags.head(60).fillna("-").to_dict("records"),
+                    "fund_flow": fund_ai.head(40).fillna("-").to_dict("records"),
+                    "data_quality": dq_ai.fillna("-").to_dict("records"),
+                }
+
+                if api_key:
+                    from openai import OpenAI
+                    client = OpenAI(api_key=api_key)
+                    response = client.responses.create(
+                        model="gpt-6-luna",
+                        input=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are a forensic financial analysis copilot. "
+                                    "Answer only from the supplied evidence context. "
+                                    "Distinguish facts, observations and review priorities. "
+                                    "Never conclude fraud, guilt, illegality or intent. "
+                                    "If evidence is insufficient, say so. Be concise and professional."
+                                ),
+                            },
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Evidence context:\n" + str(context) +
+                                    "\n\nInvestigator question: " + question
+                                ),
+                            },
+                        ],
+                    )
+                    st.markdown(response.output_text)
+                else:
+                    review_n = int((df["Priority"] == "REVIEW").sum())
+                    critical_n = int((df["Priority"] == "CRITICAL").sum())
+                    rapid_n = int(df["Rapid_Movement"].sum())
+                    mismatch_n = int(len(balance_check(df)))
+                    st.markdown(
+                        "**Quick evidence answer**\n\n"
+                        "- Transactions analysed: **" + f"{len(df):,}" + "**\n"
+                        "- Review priorities: **" + f"{review_n:,}" + "**\n"
+                        "- Critical priorities: **" + f"{critical_n:,}" + "**\n"
+                        "- Rapid same/next-day movements: **" + f"{rapid_n:,}" + "**\n"
+                        "- Balance mismatches: **" + f"{mismatch_n:,}" + "**\n\n"
+                        "For conversational evidence reasoning, add an OPENAI_API_KEY "
+                        "to the Streamlit app secrets."
+                    )
+            except Exception as exc:
+                st.error(f"AI Assistant could not respond: {exc}")
+
+
+# ============================================================
+# EXPORT
+# ============================================================
+
+with tabs[6]:
 
     st.subheader("Evidence-Ready Export")
     st.caption("Download the concise investigation workbook or executive forensic report.")
