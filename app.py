@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from forensic_core import analyze_upload, build_workbook, build_master_analysis, build_pdf_report, balance_check
+from forensic_core import analyze_upload, build_workbook, build_master_analysis, build_pdf_report, balance_mismatches
 
 
 # ============================================================
@@ -547,7 +547,7 @@ with tabs[5]:
                     review_n = int((df["Priority"] == "REVIEW").sum())
                     critical_n = int((df["Priority"] == "CRITICAL").sum())
                     rapid_n = int(df["Rapid_Movement"].sum())
-                    mismatch_n = int(len(balance_check(df)))
+                    mismatch_n = int(balance_mismatches(df))
                     st.markdown(
                         "**Quick evidence answer**\n\n"
                         "- Transactions analysed: **" + f"{len(df):,}" + "**\n"
