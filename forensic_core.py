@@ -624,6 +624,13 @@ def _native_pdf_position_rows(data, progress_callback=None):
                     elif re.search(r"\bCR\b", upper_line):
                         credit_value = amt
 
+            # HARD TRANSACTION-EVIDENCE RULE:
+            # A date alone is never a transaction. Rows that contain only a
+            # repeated/reference date (e.g. "05/07/23") and no Debit/Credit
+            # movement are PDF continuation/noise rows and must be rejected.
+            if pd.isna(debit_value) and pd.isna(credit_value):
+                continue
+
             frames.append(
                 pd.DataFrame(
                     [{
@@ -797,6 +804,13 @@ def _ocr_pdf_position_rows(data, progress_callback=None):
             debit_value = amt("debit")
             credit_value = amt("credit")
             balance_value = amt("balance")
+
+            # HARD TRANSACTION-EVIDENCE RULE:
+            # A date alone is never a transaction. OCR often creates false
+            # rows from continuation/reference dates such as "05/07/23".
+            # Reject any row with no Debit/Credit movement amount.
+            if pd.isna(debit_value) and pd.isna(credit_value):
+                continue
 
             # Require an actual amount in debit/credit or a balance. Never use
             # a number embedded in narration as a transaction amount.
