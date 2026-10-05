@@ -640,10 +640,14 @@ def analyze_pdf(data, name):
     movement_presence = df[["Debit", "Credit"]].notna().any(axis=1).mean()
     balance_presence = df["Balance"].notna().mean()
 
-    if movement_presence < 0.60 and balance_presence < 0.60:
+    # A digital bank statement is not considered reliable unless the actual
+    # transaction amount is recovered in Debit or Credit. Balance-only rows
+    # are not sufficient because narration may itself contain numbers.
+    if movement_presence < 0.60:
         raise ValueError(
             f"PDF extraction confidence is too low ({movement_presence:.0%} rows contain Debit/Credit; "
-            f"{balance_presence:.0%} contain Balance). No values were invented."
+            f"{balance_presence:.0%} contain Balance). Debit/Credit amounts could not be mapped reliably, "
+            "so the analysis was stopped rather than guessing from narration."
         )
 
     if "Source_Page" not in df:
