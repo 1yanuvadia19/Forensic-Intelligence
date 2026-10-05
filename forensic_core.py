@@ -152,16 +152,61 @@ def category(t, d, c):
 
 
 def counterparty(t):
-    t = str(t).strip()
-    if not t or t.upper() in {"CASH DEPOSIT", "CASH WITHDRAWAL", "SELF", "BANK CHARGES", "INTEREST CREDIT"}:
+    """Extract an explicitly present counterparty/name from narration.
+
+    This is evidence extraction, not identity inference. For UPI, a readable
+    name is returned only when it is explicitly present in the narration.
+    IDs, URLs, VPA fragments and pure numeric tokens are never treated as names.
+    """
+    t = re.sub(r"\\s+", " ", str(t)).strip()
+    if not t:
         return ""
-    return t[:160]
+
+    u = t.upper()
+    if u in {"CASH DEPOSIT", "CASH WITHDRAWAL", "SELF", "BANK CHARGES", "INTEREST CREDIT"}:
+        return ""
+
+    # Remove common payment metadata while preserving readable name text.
+    cleaned = re.sub(
+        r"(?i)\\b(?:UPI|IMPS|NEFT|RTGS|NACH|ECS|ACH|CMS|POS|ATM|VPA)\\b[/_:\-]*",
+        " ",
+        t,
+    )
+    cleaned = re.sub(r"https?://\\S+", " ", cleaned)
+    cleaned = re.sub(r"\\b\\d{5,}\\b", " ", cleaned)
+    cleaned = re.sub(r"[/|:_\\-]+", " ", cleaned)
+    cleaned = re.sub(r"\\s+", " ", cleaned).strip(" -")
+
+    # Prefer 2+ alphabetic words. Keep initials and normal business-name words.
+    candidates = re.findall(
+        r"(?<![A-Za-z])([A-Za-z][A-Za-z.'&]{1,}(?:\\s+[A-Za-z][A-Za-z.'&]{1,}){1,5})(?![A-Za-z])",
+        cleaned,
+    )
+    stop = {
+        "BANK", "TRANSFER", "PAYMENT", "PAY", "COLLECT", "REQUEST",
+        "MERCHANT", "TRANSACTION", "SUCCESS", "FAILED", "SENT", "RECEIVED",
+        "DIGITAL", "MOBILE", "INTERNET", "BANKING", "CHARGES",
+    }
+    for c in candidates:
+        words = c.split()
+        useful = [w for w in words if w.upper() not in stop]
+        if len(useful) >= 2 and any(len(w) >= 3 for w in useful):
+            return " ".join(useful)[:160]
+
+    # A single explicit alphabetic token can be a person's name, but only
+    # when it is not a known rail/provider/metadata word.
+    singles = re.findall(r"(?<![A-Za-z])([A-Za-z][A-Za-z.'&]{2,})(?![A-Za-z])", cleaned)
+    for c in singles:
+        if c.upper() not in stop and c.upper() not in {"UPI", "NEFT", "IMPS", "RTGS", "NACH"}:
+            return c[:160]
+
+    return ""
 
 
 def enrich(df):
     x = df.copy()
-    x["Counterparty"] = x["Narration"].map(counterparty)
     x["Payment_Rail"] = [rail(v) for v in x["Narration"]]
+    x["Counterparty"] = x["Narration"].map(counterparty)
     x["Category"] = [category(t, d, c) for t, d, c in zip(x.Narration, x.Debit, x.Credit)]
     x["Abs_Amount"] = x[["Debit", "Credit"]].fillna(0).sum(axis=1)
 
@@ -600,6 +645,182 @@ def _native_pdf_position_rows(data):
     return result
 
 
+
+def _ocr_pdf_position_rows(data):
+    """OCR scanned bank PDFs into conservative transaction rows.
+
+    The OCR path reconstructs the table from page coordinates. It does not
+    invent amounts from narration. Pages without a confident header/amount
+    layout are skipped and reported through Source_Page.
+    """
+    import fitz
+    import pytesseract
+    from PIL import Image
+
+    doc = fitz.open(stream=data, filetype="pdf")
+    all_rows = []
+
+    date_re = re.compile(r"\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b")
+    amount_re = re.compile(r"^\(?\d[\d,]*(?:\.\d+)?\)?(?:\s*(?:CR|DR))?$", re.I)
+
+    def group_lines(words):
+        lines = {}
+        for w in words:
+            y = round(float(w["top"]) / 3) * 3
+            lines.setdefault(y, []).append(w)
+        return {k: sorted(v, key=lambda z: z["left"]) for k, v in lines.items()}
+
+    def find_header(lines):
+        best = None
+        score_best = -1
+        for y, ws in lines.items():
+            text = " ".join(w["text"] for w in ws)
+            n = norm(text)
+            score = sum(
+                term in n for term in [
+                    "date", "description", "narration", "particular",
+                    "debit", "credit", "withdrawal", "deposit", "balance"
+                ]
+            )
+            if score >= 3 and score > score_best:
+                score_best = score
+                best = (y, ws)
+        return best
+
+    def centers_from_header(ws):
+        items = [(w["text"], w["left"] + w["width"] / 2) for w in ws]
+        def token(tokens):
+            hits = [x for text, x in items if any(t in norm(text) for t in tokens)]
+            return min(hits) if hits else None
+        return {
+            "date": token(["date"]),
+            "value": token(["value"]),
+            "narr": token(["description", "narration", "particular", "details", "remarks"]),
+            "ref": token(["reference", "ref", "cheque", "utr"]),
+            "debit": token(["debit", "withdrawal", "withdraw"]),
+            "credit": token(["credit", "deposit"]),
+            "balance": token(["balance"]),
+        }
+
+    def assign(x, centers):
+        ordered = sorted([(k, v) for k, v in centers.items() if v is not None], key=lambda z: z[1])
+        for i, (name, cx) in enumerate(ordered):
+            left = -1e9 if i == 0 else (ordered[i-1][1] + cx) / 2
+            right = 1e9 if i == len(ordered)-1 else (cx + ordered[i+1][1]) / 2
+            if left <= x < right:
+                return name
+        return None
+
+    for page_no, page in enumerate(doc, 1):
+        pix = page.get_pixmap(matrix=fitz.Matrix(1.15, 1.15), alpha=False)
+        image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+        data_dict = pytesseract.image_to_data(
+            image,
+            output_type=pytesseract.Output.DICT,
+            config="--psm 6",
+        )
+        words = []
+        for i, text_value in enumerate(data_dict["text"]):
+            text_value = str(text_value).strip()
+            if not text_value:
+                continue
+            try:
+                conf = float(data_dict["conf"][i])
+            except Exception:
+                conf = -1
+            if conf < 20:
+                continue
+            words.append({
+                "text": text_value,
+                "left": float(data_dict["left"][i]),
+                "top": float(data_dict["top"][i]),
+                "width": float(data_dict["width"][i]),
+            })
+
+        if not words:
+            continue
+
+        lines = group_lines(words)
+        header = find_header(lines)
+        if header is None:
+            continue
+
+        header_y, header_words = header
+        centers = centers_from_header(header_words)
+        if centers["date"] is None or centers["balance"] is None:
+            continue
+        if centers["debit"] is None and centers["credit"] is None:
+            continue
+
+        for y, ws in sorted(lines.items()):
+            if y <= header_y + 4:
+                continue
+            line = " ".join(w["text"] for w in ws)
+            dm = date_re.search(line)
+            if not dm:
+                continue
+            nline = norm(line)
+            if sum(t in nline for t in ["date", "narration", "description", "debit", "credit", "balance"]) >= 3:
+                continue
+
+            buckets = {k: [] for k in centers}
+            for w in ws:
+                k = assign(w["left"] + w["width"]/2, centers)
+                if k:
+                    buckets[k].append(w["text"])
+
+            date_text = " ".join(buckets.get("date", []))
+            dm2 = date_re.search(date_text) or dm
+            dt = pd.to_datetime(dm2.group(0).replace(".", "-").replace("/", "-"), dayfirst=True, errors="coerce")
+            if pd.isna(dt):
+                continue
+
+            def amt(key):
+                for raw in reversed(buckets.get(key, [])):
+                    if amount_re.fullmatch(raw.replace("₹", "").strip()):
+                        value = money(raw)
+                        if pd.notna(value):
+                            return abs(value)
+                return np.nan
+
+            debit_value = amt("debit")
+            credit_value = amt("credit")
+            balance_value = amt("balance")
+
+            # Require an actual amount in debit/credit or a balance. Never use
+            # a number embedded in narration as a transaction amount.
+            if pd.isna(debit_value) and pd.isna(credit_value) and pd.isna(balance_value):
+                continue
+
+            narr = " ".join(buckets.get("narr", [])).strip()
+            ref = " ".join(buckets.get("ref", [])).strip()
+            if not narr:
+                # Preserve the non-date text as evidence if column OCR missed it.
+                narr = re.sub(re.escape(dm2.group(0)), "", line, count=1).strip()
+
+            all_rows.append({
+                "Date": dt,
+                "Value_Date": pd.NaT,
+                "Narration": narr,
+                "Reference": ref,
+                "Debit": debit_value,
+                "Credit": credit_value,
+                "Balance": balance_value,
+                "Source_Page": page_no,
+            })
+
+    if not all_rows:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(all_rows, columns=CANON + ["Source_Page"])
+    result = result.drop_duplicates(
+        subset=["Date", "Narration", "Debit", "Credit", "Balance", "Source_Page"],
+        keep="first",
+    ).reset_index(drop=True)
+    return result
+
+
 def analyze_pdf(data, name):
     import fitz
 
@@ -610,44 +831,39 @@ def analyze_pdf(data, name):
     ratio = nonempty / pages if pages else 0
 
     if ratio < 0.5:
-        raise ValueError(
-            f"{pages}-page PDF appears scanned/image-based ({nonempty} pages contain extractable text). "
-            "Scanned PDFs require OCR reconstruction before reliable forensic extraction."
-        )
-
-    # Fast path: use PDF word coordinates first. This preserves the real Debit/Credit
-    # column instead of letting narration numbers become transaction amounts.
-    df = _native_pdf_position_rows(data)
-    extraction_method = "Native PDF column-position extraction"
-
-    if df.empty:
-        # Slower generic table extraction is only a fallback.
-        df = _native_pdf_tables(data)
-        extraction_method = "Native PDF table extraction"
-
-    if df.empty:
-        raise ValueError(
-            "Digital PDF detected, but the transaction columns could not be mapped reliably. "
-            "No rows were invented."
-        )
+        # Scanned/image PDF: use the real OCR reconstruction path.
+        df = _ocr_pdf_position_rows(data)
+        extraction_method = "OCR table reconstruction"
+        if df.empty:
+            raise ValueError(
+                f"{pages}-page scanned PDF was detected, but OCR could not reconstruct "
+                "a reliable transaction table. No values were invented."
+            )
+    else:
+        # Digital/native PDF: use coordinate-aware extraction first.
+        df = _native_pdf_position_rows(data)
+        extraction_method = "Native PDF column-position extraction"
+        if df.empty:
+            df = _native_pdf_tables(data)
+            extraction_method = "Native PDF table extraction"
+        if df.empty:
+            raise ValueError(
+                "Digital PDF detected, but the transaction columns could not be mapped reliably. "
+                "No rows were invented."
+            )
 
     df = df[df["Date"].notna()].copy()
     if df.empty:
         raise ValueError("PDF extraction produced no reliable dated transaction rows.")
 
-    # Do not accept a PDF merely because Balance was extracted. Require actual
-    # transaction movement to be present on a meaningful share of rows.
     movement_presence = df[["Debit", "Credit"]].notna().any(axis=1).mean()
     balance_presence = df["Balance"].notna().mean()
 
-    # A digital bank statement is not considered reliable unless the actual
-    # transaction amount is recovered in Debit or Credit. Balance-only rows
-    # are not sufficient because narration may itself contain numbers.
     if movement_presence < 0.60:
         raise ValueError(
             f"PDF extraction confidence is too low ({movement_presence:.0%} rows contain Debit/Credit; "
-            f"{balance_presence:.0%} contain Balance). Debit/Credit amounts could not be mapped reliably, "
-            "so the analysis was stopped rather than guessing from narration."
+            f"{balance_presence:.0%} contain Balance). The transaction amounts could not be "
+            "mapped reliably, so the analysis was stopped rather than guessing."
         )
 
     if "Source_Page" not in df:
@@ -657,17 +873,18 @@ def analyze_pdf(data, name):
     flags = df[df.Priority.isin(["REVIEW", "CRITICAL"])].copy()
 
     meta = {
-        "source_type": "PDF — native/digital",
+        "source_type": "PDF — scanned/OCR" if ratio < 0.5 else "PDF — native/digital",
         "location": f"{pages} pages",
         "layout_confidence": extraction_method,
         "warnings": [
-            "Native PDF amounts are mapped from PDF column positions.",
+            f"Extraction method: {extraction_method}.",
+            "Debit/Credit values are accepted only from detected transaction columns.",
             "Source_Page is retained for evidence tracing.",
+            "Blank amount fields are treated as unknown, not zero.",
         ],
     }
 
     return {"transactions": df, "flags": flags, "meta": meta}
-
 
 def analyze_upload(data, name):
     ext = Path(name).suffix.lower()
