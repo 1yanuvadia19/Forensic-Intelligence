@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from forensic_core import analyze_upload, build_workbook, build_master_analysis, build_pdf_report
+from forensic_core import analyze_upload, build_workbook, build_master_analysis, build_pdf_report, balance_check
 
 
 # ============================================================
