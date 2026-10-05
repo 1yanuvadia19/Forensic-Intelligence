@@ -872,4 +872,84 @@ def balance_check(df):
 
 
 def balance_mismatches(df):
-    return len(balance_check(df))
+    return len(balance_check(df))def _ocr_pdf_position_rows(data):
+    import fitz
+    import pytesseract
+    from PIL import Image
+    doc=fitz.open(stream=data,filetype="pdf")
+    frames=[]
+    for page_no,page in enumerate(doc,1):
+        pix=page.get_pixmap(matrix=fitz.Matrix(2,2),alpha=False)
+        img=Image.frombytes("RGB",[pix.width,pix.height],pix.samples)
+        od=pytesseract.image_to_data(img,config="--psm 6",output_type=pytesseract.Output.DICT)
+        words=[]
+        for i,txt in enumerate(od["text"]):
+            txt=(txt or "").strip()
+            try: conf=float(od["conf"][i])
+            except: conf=-1
+            if txt and conf>=25:
+                words.append((od["left"][i],od["top"][i],od["left"][i]+od["width"][i],od["top"][i]+od["height"][i],txt))
+        lines={}
+        for w in words: lines.setdefault(round(w[1]/8)*8,[]).append(w)
+        header=None; score=-1
+        for y,ws in lines.items():
+            txt=" ".join(w[4] for w in sorted(ws,key=lambda z:z[0])); nrm=norm(txt)
+            sc=sum(k in nrm for k in ["date","description","narration","particular","debit","credit","balance","withdrawal","deposit"])
+            if sc>score and sc>=3: score=sc; header=(y,ws)
+        if header is None: continue
+        hws=sorted(header[1],key=lambda z:z[0])
+        cx=lambda w:(w[0]+w[2])/2
+        def fx(patterns):
+            xs=[cx(w) for w in hws if any(p in norm(w[4]) for p in patterns)]
+            return min(xs) if xs else None
+        cols=[("date",fx(["post date","transaction date","txn date","date"])),("value",fx(["value date"])),("narr",fx(["description","narration","particular","details","remarks"])),("ref",fx(["reference","ref no","cheque no","utr","txn id","transaction id"])),("debit",fx(["debit","withdrawal","withdraw"])),("credit",fx(["credit","deposit"])),("balance",fx(["balance","closing balance"]))]
+        cols=[x for x in cols if x[1] is not None]
+        if not any(k=="date" for k,_ in cols) or not any(k=="balance" for k,_ in cols): continue
+        nearest=lambda x:min(cols,key=lambda z:abs(z[1]-x))[0]
+        for y,ws in sorted(lines.items()):
+            if y<=header[0]+4: continue
+            ws=sorted(ws,key=lambda z:z[0]); text=" ".join(w[4] for w in ws)
+            dm=re.search(r"\b(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})\b",text)
+            if not dm: continue
+            b={k:[] for k,_ in cols}
+            for w in ws: b[nearest(cx(w))].append(w[4])
+            dt=" ".join(b.get("date",[])); dm2=re.search(r"\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}",dt) or dm
+            datev=pd.to_datetime(dm2.group(0).replace(".","-").replace("/","-"),dayfirst=True,errors="coerce")
+            if pd.isna(datev): continue
+            def amt(k):
+                for v in reversed(b.get(k,[])):
+                    z=money(v)
+                    if pd.notna(z): return abs(z)
+                return np.nan
+            narr=" ".join(b.get("narr",[])).strip() or text
+            value=pd.NaT
+            vm=re.search(r"\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}"," ".join(b.get("value",[])))
+            if vm: value=pd.to_datetime(vm.group(0).replace(".","-").replace("/","-"),dayfirst=True,errors="coerce")
+            frames.append(pd.DataFrame([{"Date":datev,"Value_Date":value,"Narration":narr,"Reference":" ".join(b.get("ref",[])).strip(),"Debit":amt("debit"),"Credit":amt("credit"),"Balance":amt("balance"),"Source_Page":page_no}]))
+    return pd.concat(frames,ignore_index=True) if frames else pd.DataFrame()
+
+
+def analyze_pdf(data,name):
+    import fitz
+    doc=fitz.open(stream=data,filetype="pdf")
+    pages=len(doc); texts=[p.get_text("text") for p in doc]
+    nonempty=sum(bool(t.strip()) for t in texts); ratio=nonempty/pages if pages else 0
+    extraction="Native PDF table extraction"
+    df=_native_pdf_tables(data) if ratio>=0.5 else pd.DataFrame()
+    if df.empty and ratio>=0.5:
+        df=_native_pdf_position_rows(data); extraction="Native PDF column-position extraction"
+    if df.empty:
+        extraction="OCR scanned-PDF extraction"
+        try: df=_ocr_pdf_position_rows(data)
+        except Exception as exc: raise ValueError("Scanned PDF detected, but OCR could not be completed. Check statement readability.") from exc
+    if df.empty: raise ValueError("No reliable transaction table could be reconstructed from this PDF.")
+    df=df[df["Date"].notna()].copy()
+    if df.empty: raise ValueError("PDF extraction produced no reliable dated transaction rows.")
+    presence=df[["Debit","Credit","Balance"]].notna().any(axis=1).mean()
+    if presence<0.60: raise ValueError(f"PDF extraction confidence is too low ({presence:.0%}). No values were invented.")
+    if "Source_Page" not in df: df["Source_Page"]=np.nan
+    df=enrich(df); flags=df[df.Priority.isin(["REVIEW","CRITICAL"])].copy()
+    return {"transactions":df,"flags":flags,"meta":{"source_type":"PDF — scanned/OCR" if ratio<0.5 else "PDF — native/digital","location":f"{pages} pages","layout_confidence":extraction,"warnings":[f"Extraction method: {extraction}. Source_Page retained."]}}
+
+
+
