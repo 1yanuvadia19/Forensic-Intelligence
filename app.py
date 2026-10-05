@@ -13,7 +13,7 @@ from forensic_core import analyze_upload, build_workbook, build_master_analysis,
 # ============================================================
 
 st.set_page_config(
-    page_title="Forensic Intelligence 360°",
+    page_title="Forensic Intelligence",
     page_icon="🔎",
     layout="wide",
 )
@@ -71,7 +71,7 @@ st.markdown(
 st.markdown(
     """
     <div class="hero">
-        <h1>🔎 FORENSIC INTELLIGENCE 360°</h1>
+        <h1>🔎 FORENSIC INTELLIGENCE</h1>
         <p>
             Bank-statement intelligence • payment-rail parsing •
             anomaly screening • evidence-ready exports
@@ -556,7 +556,7 @@ with tabs[6]:
 st.divider()
 
 st.caption(
-    "FORENSIC INTELLIGENCE 360° • "
+    "FORENSIC INTELLIGENCE • "
     "Evidence-first analysis • "
     "Human review required for investigative conclusions"
 )
