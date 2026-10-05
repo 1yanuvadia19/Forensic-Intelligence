@@ -1,5 +1,6 @@
 import io
 import os
+import hashlib
 from pathlib import Path
 
 import pandas as pd
@@ -101,6 +102,19 @@ with st.sidebar:
 
     st.divider()
 
+    if "analysis_history" not in st.session_state:
+        st.session_state.analysis_history = []
+
+    st.markdown("### History")
+    if st.session_state.analysis_history:
+        st.caption(f"{len(st.session_state.analysis_history)} statement(s) analysed in this session")
+        for item in st.session_state.analysis_history[-8:][::-1]:
+            st.write(f"• {item['name']} — {item['transactions']:,} transactions")
+    else:
+        st.caption("No statements analysed yet in this session.")
+
+    st.divider()
+
     st.markdown("### Pipeline")
 
     pipeline = [
@@ -155,23 +169,59 @@ if uploaded_file is None:
 
 file_bytes = uploaded_file.getvalue()
 file_name = uploaded_file.name
+file_hash = hashlib.sha256(file_bytes).hexdigest()
 
 st.caption(
     f"Evidence loaded: **{file_name}** • "
     f"{len(file_bytes):,} bytes"
 )
 
+# Reuse the result for the same uploaded evidence instead of re-running
+# the entire PDF pipeline on every Streamlit rerun.
+cached_result = st.session_state.get("analysis_result")
+cached_hash = st.session_state.get("analysis_hash")
 
-with st.spinner("Analysing evidence..."):
+if cached_result is not None and cached_hash == file_hash:
+    result = cached_result
+    st.success("✓ Existing analysis reused — no re-processing required.")
+else:
+    progress = st.progress(0, text="Starting forensic analysis…")
+    status = st.empty()
+
+    def show_progress(done, total, message):
+        total = max(int(total or 1), 1)
+        pct = max(0.0, min(float(done) / total, 1.0))
+        progress.progress(pct, text=f"{int(pct * 100)}% — {message}")
+        status.caption(f"Analysis progress: **{int(pct * 100)}%**")
 
     try:
-
         result = analyze_upload(
             file_bytes,
             file_name,
+            progress_callback=show_progress,
         )
+        progress.progress(1.0, text="100% — Analysis complete")
+        status.success("Forensic analysis completed successfully.")
+
+        st.session_state.analysis_result = result
+        st.session_state.analysis_hash = file_hash
+
+        # Store a compact session history record. Full transaction data stays
+        # in analysis_result; history is intentionally lightweight.
+        history = st.session_state.setdefault("analysis_history", [])
+        history = [h for h in history if h["hash"] != file_hash]
+        history.append({
+            "hash": file_hash,
+            "name": file_name,
+            "transactions": len(result["transactions"]),
+            "source": result["meta"].get("source_type", "-"),
+            "location": result["meta"].get("location", "-"),
+        })
+        st.session_state.analysis_history = history[-25:]
 
     except Exception as exc:
+        progress.empty()
+        status.empty()
 
         st.error(
             "⚠️ **Evidence extraction / validation failed**"
@@ -213,6 +263,7 @@ tabs = st.tabs(
         "🧠 Master Analysis",
         "🤖 AI Assistant",
         "📤 Export",
+        "🗂️ History",
     ]
 )
 
@@ -547,6 +598,39 @@ with tabs[6]:
 
     except Exception as exc:
         st.error(f"Could not generate the export: {exc}")
+
+
+# ============================================================
+# HISTORY
+# ============================================================
+
+with tabs[7]:
+
+    st.subheader("🗂️ Analysis History")
+    st.caption(
+        "Statements analysed during this browser session. "
+        "The original evidence is not altered."
+    )
+
+    history = st.session_state.get("analysis_history", [])
+
+    if not history:
+        st.info("No statement has been analysed in this session yet.")
+    else:
+        history_df = pd.DataFrame(history)
+        history_df = history_df.rename(columns={
+            "name": "Statement",
+            "transactions": "Transactions",
+            "source": "Source",
+            "location": "Location",
+        })
+        history_df = history_df.drop(columns=["hash"], errors="ignore")
+        st.dataframe(history_df.iloc[::-1], use_container_width=True, hide_index=True)
+
+        st.info(
+            "The same uploaded statement is automatically reused during this session, "
+            "so changing tabs or interacting with the app does not re-run PDF extraction."
+        )
 
 
 # ============================================================
