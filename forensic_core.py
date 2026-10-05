@@ -896,10 +896,19 @@ def analyze_pdf(data, name, progress_callback=None):
             df = _native_pdf_tables(data)
             extraction_method = "Native PDF table extraction"
         if df.empty:
-            raise ValueError(
-                "Digital PDF detected, but the transaction columns could not be mapped reliably. "
-                "No rows were invented."
-            )
+            # Some bank PDFs are hybrid: they contain enough selectable text in
+            # headers/footers to look "digital", while the actual transaction
+            # table is an embedded image. In that case native mapping returns no
+            # rows. Safely fall back to OCR instead of rejecting the statement.
+            df = _ocr_pdf_position_rows(data, progress_callback=progress_callback)
+            if len(df):
+                extraction_method = "OCR fallback for hybrid PDF"
+            else:
+                raise ValueError(
+                    "Digital PDF detected, but the transaction columns could not be mapped reliably. "
+                    "OCR fallback also could not reconstruct a reliable transaction table. "
+                    "No values were invented."
+                )
 
     if progress_callback:
         progress_callback(pages, max(pages, 1), "Validating extracted transactions")
