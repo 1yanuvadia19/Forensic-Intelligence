@@ -1133,7 +1133,6 @@ def _ocr_pdf_position_rows(data, progress_callback=None, ocr_psm=6):
 
                 all_rows.append({
                     "Date": dt,
-                    "Value_Date": value_dt,
                     "Narration": narration,
                     "Reference": reference,
                     "Debit": debit_value,
