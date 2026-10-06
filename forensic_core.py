@@ -1451,11 +1451,12 @@ def analyze_pdf(data, name, progress_callback=None):
     doc = fitz.open(stream=data, filetype="pdf")
     pages = len(doc)
     texts = [p.get_text("text") for p in doc]
+    nonempty = sum(bool(t.strip()) for t in texts)
+    ratio = nonempty / pages if pages else 0
+
     source_opening_balance = _extract_opening_balance_from_text("\n".join(texts))
     if pd.isna(source_opening_balance) and ratio < 0.5:
         source_opening_balance = _extract_opening_balance_from_ocr(data)
-    nonempty = sum(bool(t.strip()) for t in texts)
-    ratio = nonempty / pages if pages else 0
 
     if progress_callback:
         progress_callback(0, max(pages, 1), "Detecting PDF type and layout")
