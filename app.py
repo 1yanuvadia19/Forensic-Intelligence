@@ -614,7 +614,12 @@ if tabs[6].open:
         st.caption("Download the concise investigation workbook or executive forensic report.")
 
         export_hash = st.session_state.get("export_hash")
-        export_ready = export_hash == file_hash and st.session_state.get("export_workbook") is not None
+        export_engine_version = st.session_state.get("export_engine_version")
+        export_ready = (
+            export_hash == file_hash
+            and export_engine_version == ANALYSIS_ENGINE_VERSION
+            and st.session_state.get("export_workbook") is not None
+        )
 
         if not export_ready:
             st.info("Exports are generated only when requested, which keeps the Community Cloud app responsive.")
