@@ -178,7 +178,11 @@ def _name_after_marker(raw, markers):
 
 
 def semantic_narration(t, d=np.nan, c=np.nan):
-    """Rename particulars using explicit bank-statement evidence and the user-defined forensic rules."""
+    """Create concise, human-style particulars from explicit statement evidence.
+
+    This is normalization, not identity inference. Readable names are retained
+    only when the source narration actually exposes them.
+    """
     raw = re.sub(r"\s+", " ", str(t or "")).strip()
     if not raw:
         return "-"
@@ -186,9 +190,13 @@ def semantic_narration(t, d=np.nan, c=np.nan):
     debit = pd.notna(d) and float(d) > 0
     credit = pd.notna(c) and float(c) > 0
 
-    # Bank-generated entries.
+    # Bank-generated entries first: these should remain clean and human-readable.
     if re.search(r"\b(?:INTEREST|INT\.?\s*PD|INT\.?\s*CR|INTEREST\s*CREDIT|INT\.PD)\b", u):
         return "Interest"
+    if re.search(r"\b(?:BY\s*SALARY|SALARY\s*CREDIT|SALARY)\b", u) and credit:
+        return "Salary"
+    if re.search(r"\b(?:DIVIDEND|DIV\.?\s*CR)\b", u) and credit:
+        return "Dividend"
     if re.search(r"\b(?:AMB|NON\s*MAINTENANCE|BANK\s*CHARGE|SERVICE\s*CHARGE|SMS\s*ALERT|CHRG|CHARGES|GST\s*ON\s*CHARGES|FEE|COMMISSION)\b", u):
         return "Bank Charge"
 
@@ -202,25 +210,46 @@ def semantic_narration(t, d=np.nan, c=np.nan):
     if re.search(r"\b(?:CASH\s*DEPOSIT|CASH\s*DEP|CDM\s*CR|BY\s*CASH)\b", u) and credit:
         return "Cash Deposit"
 
-    # Explicit transfer direction requested by the forensic prompt.
-    if re.search(r"\b(?:DEP\s*T(?:R|F)|DEPOSIT\s*T(?:R|F)|DEPOSIT\s*TRANSFER|TFR\s*IN|TRANSFER\s*IN)\b", u):
-        party = _name_after_marker(raw, [r"DEP\s*T(?:R|F)", r"DEPOSIT\s*TRANSFER", r"TFR\s*IN", r"TRANSFER\s*IN"])
-        return f"TRANSFER IN - {party}" if party else "TRANSFER IN"
-    if re.search(r"\b(?:WDL\s*T(?:R|F|D)|WITHDRAWAL\s*TRANSFER|TFR\s*OUT|TRANSFER\s*OUT)\b", u):
-        party = _name_after_marker(raw, [r"WDL\s*T(?:R|F|D)", r"WITHDRAWAL\s*TRANSFER", r"TFR\s*OUT", r"TRANSFER\s*OUT"])
+    # Claude-style transfer normalization, including common TRF/TRF-Dr forms.
+    incoming = (
+        r"\b(?:DEP\s*T(?:R|F)|DEPOSIT\s*T(?:R|F)|DEPOSIT\s*TRANSFER|"
+        r"TFR\s*IN|TRANSFER\s*IN|RECEIVED|RECD|RECEIPT|CREDITED|BY\s*TRANSFER)\b"
+    )
+    outgoing = (
+        r"\b(?:WDL\s*T(?:R|F|D)|WITHDRAWAL\s*TRANSFER|"
+        r"TFR\s*OUT|TRANSFER\s*OUT|TRF\s*-?\s*DR|TRANSFER\s*-?\s*DR)\b"
+    )
+    if debit and re.search(outgoing, u):
+        party = _name_after_marker(
+            raw,
+            [r"TRF\s*-?\s*DR", r"WDL\s*T(?:R|F|D)", r"WITHDRAWAL\s*TRANSFER",
+             r"TFR\s*OUT", r"TRANSFER\s*OUT"],
+        )
         return f"TRANSFER OUT - {party}" if party else "TRANSFER OUT"
+    if credit and re.search(incoming, u):
+        party = _name_after_marker(
+            raw,
+            [r"DEP\s*T(?:R|F)", r"DEPOSIT\s*T(?:R|F)", r"DEPOSIT\s*TRANSFER",
+             r"TFR\s*IN", r"TRANSFER\s*IN", r"RECEIVED", r"RECD", r"BY\s*TRANSFER"],
+        )
+        return f"TRANSFER IN - {party}" if party else "TRANSFER IN"
+
+    # Loan/finance entries: keep the lender/party where explicitly readable.
+    if re.search(r"\b(?:EMI|LOAN|FINANCE|DIRECT\s*DEBIT|NACHDR)\b", u):
+        party = counterparty(raw)
+        return f"Loan / Finance - {party}" if party else "Loan / Finance"
 
     # Card/POS: retain the merchant/person name when explicitly present.
     if re.search(r"\b(?:POS|PUR|ECOM\s*PUR|DEBIT\s*CARD|CREDIT\s*CARD|CARD\s*PAYMENT)\b", u):
         party = counterparty(raw)
         return f"POS transaction - {party}" if party else "POS transaction"
 
-    # UPI / GPay / Paytm / PhonePe are deliberately labelled Net Banking per the requested output convention.
-    if re.search(r"\bUPI\b|G[- ]?PAY|GOOGLEPAY|PAYTM|PHONE[- ]?PE|PHONEPE", u):
+    # UPI / internet-banking channels are presented in the concise human style
+    # requested for the export, while the original evidence remains in analysis.
+    if re.search(r"\b(?:UPI|NET\s*BANKING|INTERNET\s*BANKING|ONLINE\s*TRANSFER)\b|G[- ]?PAY|GOOGLEPAY|PAYTM|PHONE[- ]?PE|PHONEPE", u):
         party = counterparty(raw)
         return f"Net Banking - {party}" if party else "Net Banking"
 
-    # Other explicit rails: keep the original particulars rather than inventing a name.
     return raw
 
 def category(t, d, c):
@@ -261,7 +290,7 @@ def counterparty(t):
     name is returned only when it is explicitly present in the narration.
     IDs, URLs, VPA fragments and pure numeric tokens are never treated as names.
     """
-    t = re.sub(r"\\s+", " ", str(t)).strip()
+    t = re.sub(r"\s+", " ", str(t)).strip()
     if not t:
         return ""
 
@@ -271,18 +300,18 @@ def counterparty(t):
 
     # Remove common payment metadata while preserving readable name text.
     cleaned = re.sub(
-        r"(?i)\\b(?:UPI|IMPS|NEFT|RTGS|NACH|ECS|ACH|CMS|POS|ATM|VPA)\\b[/_:\-]*",
+        r"(?i)\b(?:UPI|IMPS|NEFT|RTGS|NACH|ECS|ACH|CMS|POS|ATM|VPA)\b[/_:\-]*",
         " ",
         t,
     )
-    cleaned = re.sub(r"https?://\\S+", " ", cleaned)
-    cleaned = re.sub(r"\\b\\d{5,}\\b", " ", cleaned)
-    cleaned = re.sub(r"[/|:_\\-]+", " ", cleaned)
-    cleaned = re.sub(r"\\s+", " ", cleaned).strip(" -")
+    cleaned = re.sub(r"https?://\S+", " ", cleaned)
+    cleaned = re.sub(r"\b\d{5,}\b", " ", cleaned)
+    cleaned = re.sub(r"[/|:_\-]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -")
 
     # Prefer 2+ alphabetic words. Keep initials and normal business-name words.
     candidates = re.findall(
-        r"(?<![A-Za-z])([A-Za-z][A-Za-z.'&]{1,}(?:\\s+[A-Za-z][A-Za-z.'&]{1,}){1,5})(?![A-Za-z])",
+        r"(?<![A-Za-z])([A-Za-z][A-Za-z.'&]{1,}(?:\s+[A-Za-z][A-Za-z.'&]{1,}){1,5})(?![A-Za-z])",
         cleaned,
     )
     stop = {
@@ -315,7 +344,7 @@ def _normalize_reference_fields(df):
     """
     x = df.copy()
     ref_pattern = re.compile(
-        r"(?i)(?:\\b(?:UPI|IMPS|NEFT|RTGS|NACH|ECS|ACH|CLIN|DAP|FINANCE|UTR|RRN|REF|TRN|TXN|CHQ|CHEQUE|CTS)[/_:\\-]?[A-Z0-9][A-Z0-9/_:\\-]{4,}|\\b\\d{8,}\\b)"
+        r"(?i)(?:\b(?:UPI|IMPS|NEFT|RTGS|NACH|ECS|ACH|CLIN|DAP|FINANCE|UTR|RRN|REF|TRN|TXN|CHQ|CHEQUE|CTS)[/_:\-]?[A-Z0-9][A-Z0-9/_:\-]{4,}|\b\d{8,}\b)"
     )
 
     for i in x.index:
@@ -328,7 +357,7 @@ def _normalize_reference_fields(df):
             leftovers = ref
             for m in matches:
                 leftovers = re.sub(re.escape(m), " ", leftovers, count=1)
-            leftovers = re.sub(r"\\s+", " ", leftovers).strip(" -:/")
+            leftovers = re.sub(r"\s+", " ", leftovers).strip(" -:/")
             if leftovers and leftovers.lower() not in {"ph", "no", "na", "n a"}:
                 narr = f"{narr} {leftovers}".strip()
             elif leftovers.lower() == "ph":
@@ -727,7 +756,7 @@ def _native_pdf_position_rows(data, progress_callback=None):
             ws = clean_words(ws)
             line_text = " ".join(w[4] for w in ws).strip()
             full_date_start = re.match(
-                r"^\\s*\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}\\b",
+                r"^\s*\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b",
                 line_text
             )
             partial_date_start = partial_date_re.match(line_text)
@@ -758,7 +787,7 @@ def _native_pdf_position_rows(data, progress_callback=None):
                     next_words = clean_words(doc[page_no].get_text("words"))
                     for nw in next_words:
                         token = str(nw[4]).strip()
-                        if re.fullmatch(r"20\\d{2}", token) and nw[1] > 400:
+                        if re.fullmatch(r"20\d{2}", token) and nw[1] > 400:
                             next_year = token
                             break
                 if next_year:
@@ -1636,8 +1665,8 @@ def analyze_pdf(data, name, progress_callback=None):
     # period is explicitly 01-01-2022 to 30-06-2023. Never allow a footer/header
     # date to become a transaction date.
     statement_period = re.search(
-        r"period of\\s+(\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4})\\s+to\\s+(\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4})",
-        "\\n".join(texts),
+        r"period of\s+(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})\s+to\s+(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})",
+        "\n".join(texts),
         flags=re.I,
     )
     period_start = period_end = None
@@ -1725,11 +1754,12 @@ def analyze_pdf(data, name, progress_callback=None):
     # forensic classification or export is allowed.
     integrity = validate_transaction_integrity(df, extraction_method)
     mismatches = integrity["balance_mismatches"]
+    balance_gaps = int(integrity.get("balance_gaps", 0))
 
     movement_presence = integrity["movement_rate"]
     balance_presence = df["Balance"].notna().mean()
 
-    source_has_balance = bool(re.search(r"\\bbalance\\b|closing\\s+balance", "\\n".join(texts), flags=re.I))
+    source_has_balance = bool(re.search(r"\bbalance\b|closing\s+balance", "\n".join(texts), flags=re.I))
     if source_has_balance and balance_presence < 0.90:
         raise ValueError(
             f"PDF data-entry validation failed: only {balance_presence:.0%} of transaction rows contain a reported Balance although the source exposes a balance column. Extraction stopped; no balance values were invented."
@@ -1762,7 +1792,8 @@ def analyze_pdf(data, name, progress_callback=None):
             "Blank amount fields are treated as unknown, not zero.",
             f"Statement-period guard removed {outside_count} extracted row(s) outside the declared transaction period." if outside_count else "All extracted transaction dates fall within the statement's declared period.",
             "Data-entry integrity gate passed: dates, movement sides and sequential balances validated.",
-            "No transaction reaches forensic classification/export until the extraction reconciles.",
+            f"Balance evidence gap/reset points accepted without fabricating a transaction: {balance_gaps}." if balance_gaps else "No balance evidence gap/reset points were required.",
+            "No transaction reaches forensic classification/export until the extraction passes the evidence gate.",
 
         ],
     }
@@ -2016,7 +2047,11 @@ def build_workbook(df, flags, meta):
     export_df = source_df.copy()
 
     # User-facing transaction schema: exactly one Date column.
-    required = ["Date", "Narration", "Reference", "Debit", "Credit", "Balance"]
+    required = [
+        "Date", "Narration", "Reference", "Debit", "Credit", "Balance",
+        "Payment_Rail", "Counterparty", "Category", "Flag_Reason",
+        "Priority", "Rapid_Movement"
+    ]
     export_df = export_df[[c for c in required if c in export_df.columns]].copy()
 
     # Missing textual values are explicit placeholders, not silent blanks.
@@ -2040,13 +2075,14 @@ def build_workbook(df, flags, meta):
     # Balance is exported exactly as extracted from the bank statement.
     # No Excel formulas are inserted; this workbook is a data-entry/evidence export.
     display_df["Balance"] = pd.to_numeric(display_df["Balance"], errors="coerce")
+    display_df["Balance"] = display_df["Balance"].where(display_df["Balance"].notna(), "-")
 
     master, fund_flow, concentration, dq, _ = build_master_analysis(source_df)
     summary = pd.DataFrame({
         "Metric": [
             "Source", "Period", "Transactions",
             "Total Credits", "Total Debits", "Net Flow",
-            "Review", "Critical", "Balance Mismatches"
+            "Review", "Critical", "Balance Mismatches", "Balance Evidence Gaps"
         ],
         "Value": [
             meta.get("source_type", "-"),
@@ -2058,6 +2094,7 @@ def build_workbook(df, flags, meta):
             int((source_df.Priority == "REVIEW").sum()),
             int((source_df.Priority == "CRITICAL").sum()),
             balance_mismatches(source_df),
+            int(balance_check(source_df).attrs.get("gap_count", 0)),
         ],
     })
 
@@ -2178,6 +2215,7 @@ def build_pdf_report(df, flags, meta, filename):
     movement_presence = df[["Debit", "Credit"]].notna().any(axis=1).mean() if len(df) else 0
     balance_presence = df["Balance"].notna().mean() if len(df) else 0
     mismatch_count = balance_mismatches(df)
+    balance_gap_count = int(balance_check(df).attrs.get("gap_count", 0))
 
     rails = df.groupby("Payment_Rail", dropna=False).agg(
         Transactions=("Narration", "size"),
@@ -2253,6 +2291,7 @@ def build_pdf_report(df, flags, meta, filename):
         ["Debit/Credit Recovery", f"{movement_presence:.1%} of rows"],
         ["Balance Recovery", f"{balance_presence:.1%} of rows"],
         ["Balance Reconciliation", f"{mismatch_count:,} mismatch(es)"],
+        ["Balance Evidence Gaps", f"{balance_gap_count:,} reset point(s)"],
     ]
 
     summary_table = Table(summary_data, colWidths=[55*mm, 48*mm], repeatRows=1)
@@ -2276,7 +2315,11 @@ def build_pdf_report(df, flags, meta, filename):
         Paragraph("Extraction & Evidence Quality", section),
     ]
 
-    quality_status = "PASS" if movement_presence >= 0.60 and mismatch_count == 0 else "REVIEW REQUIRED"
+    quality_status = (
+        "PASS WITH SOURCE GAPS" if movement_presence >= 0.60 and mismatch_count == 0 and balance_gap_count
+        else "PASS" if movement_presence >= 0.60 and mismatch_count == 0
+        else "REVIEW REQUIRED"
+    )
     quality_text = (
         f"<b>Status:</b> {quality_status}<br/>"
         f"Debit/Credit amounts recovered on {movement_presence:.1%} of transaction rows. "
