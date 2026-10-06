@@ -1619,10 +1619,27 @@ def analyze_pdf(data, name, progress_callback=None):
     df = _enforce_single_date_schema(enrich(df))
     flags = df[df.Priority.isin(["REVIEW", "CRITICAL"])].copy()
 
+    # Preserve the verified source opening balance for the workbook running-balance
+    # anchor. If the statement has no explicit opening label, derive it from the
+    # first verified transaction balance; never invent an arbitrary starting value.
+    opening_balance = source_opening_balance
+    if pd.isna(opening_balance) and not df.empty:
+        first = df.iloc[0]
+        first_balance = pd.to_numeric(first.get("Balance"), errors="coerce")
+        first_debit = pd.to_numeric(first.get("Debit"), errors="coerce")
+        first_credit = pd.to_numeric(first.get("Credit"), errors="coerce")
+        if pd.notna(first_balance):
+            opening_balance = (
+                float(first_balance)
+                - (0.0 if pd.isna(first_credit) else float(first_credit))
+                + (0.0 if pd.isna(first_debit) else float(first_debit))
+            )
+
     meta = {
         "source_type": "PDF — scanned/OCR" if ratio < 0.5 else "PDF — native/digital",
         "location": f"{pages} pages",
         "layout_confidence": extraction_method,
+        "opening_balance": opening_balance,
         "warnings": [
             f"Extraction method: {extraction_method}.",
             "Debit/Credit values are accepted only from detected transaction columns.",
@@ -1915,42 +1932,162 @@ def _format_workbook(wb):
             cell.border=border
 
 def build_workbook(df, flags, meta):
-    out=io.BytesIO()
-    export_df=df.copy()
-    for _col in ["Narration", "Reference", "Payment_Rail", "Counterparty", "Category", "Flag_Reason", "Priority"]:
-        if _col in export_df.columns:
-            export_df[_col] = export_df[_col].replace(r"^\s*$", "-", regex=True).fillna("-")
-    # Source_Page is retained internally for evidence tracing, but it is not
-    # part of the user's requested transaction export.
-    if "Source_Page" in export_df.columns:
-        export_df=export_df.drop(columns=["Source_Page"])
-    credits=export_df["Credit"].fillna(0); debits=export_df["Debit"].fillna(0)
-    master,fund_flow,concentration,dq,_=build_master_analysis(df)
-    summary=pd.DataFrame({"Metric":["Source","Period","Transactions","Total Credits","Total Debits","Net Flow","Review","Critical","Balance Mismatches"],"Value":[meta.get("source_type","-"),meta.get("location","-"),len(export_df),credits.sum(),debits.sum(),credits.sum()-debits.sum(),int((export_df.Priority=="REVIEW").sum()),int((export_df.Priority=="CRITICAL").sum()),balance_mismatches(df)]})
-    rail=df.groupby("Payment_Rail",dropna=False).agg(Transactions=("Narration","size"),Credits=("Credit","sum"),Debits=("Debit","sum")).reset_index().rename(columns={"Payment_Rail":"Analysis"}); rail.insert(0,"Section","Payment Rail")
-    cat=df.groupby("Category",dropna=False).agg(Transactions=("Narration","size"),Credits=("Credit","sum"),Debits=("Debit","sum")).reset_index().rename(columns={"Category":"Analysis"}); cat.insert(0,"Section","Category")
-    flow=pd.concat([rail,cat],ignore_index=True)
-    with pd.ExcelWriter(out,engine="openpyxl") as w:
-        summary.to_excel(w,index=False,sheet_name="01_Executive_Summary")
-        export_df.to_excel(w,index=False,sheet_name="02_Transactions")
-        flow.to_excel(w,index=False,sheet_name="03_Flow_Analysis")
-        master.to_excel(w,index=False,sheet_name="04_Master_Analysis")
-        row=len(master)+3
-        pd.DataFrame({"Section":["FUND-FLOW REVIEW"]}).to_excel(w,index=False,sheet_name="04_Master_Analysis",startrow=row-1)
+    """Build the evidence export with an explicit opening anchor and formula balance.
+
+    The source Balance column is used for the hard reconciliation gate before this
+    function is called. In the exported transaction sheet, Balance is deliberately
+    formula-driven so the workbook itself independently recomputes the running
+    balance from the verified opening balance + Credit - Debit.
+    """
+    out = io.BytesIO()
+    source_df = df.copy()
+
+    # Preserve numeric values for analysis before presentation placeholders.
+    credits = pd.to_numeric(source_df["Credit"], errors="coerce")
+    debits = pd.to_numeric(source_df["Debit"], errors="coerce")
+
+    # Opening balance must be known after the evidence gate. If unavailable,
+    # stop rather than producing a workbook with an arbitrary starting balance.
+    opening_balance = pd.to_numeric(pd.Series([meta.get("opening_balance")]), errors="coerce").iloc[0]
+    if pd.isna(opening_balance):
+        raise ValueError(
+            "Workbook export stopped: a verified opening balance is not available. "
+            "The system will not fabricate a running-balance starting point."
+        )
+
+    export_df = source_df.copy()
+
+    # User-facing transaction schema: exactly one Date column.
+    required = ["Date", "Narration", "Reference", "Debit", "Credit", "Balance"]
+    export_df = export_df[[c for c in required if c in export_df.columns]].copy()
+
+    # Missing textual values are explicit placeholders, not silent blanks.
+    for col in ["Narration", "Reference"]:
+        if col in export_df.columns:
+            export_df[col] = export_df[col].replace(r"^\s*$", "-", regex=True).fillna("-")
+
+    # Missing Debit/Credit values are shown as "-" in Excel. They remain
+    # semantically unknown; the running-balance formula treats only numeric cells
+    # as movement, which is equivalent to zero for the opposite bank side.
+    for col in ["Debit", "Credit"]:
+        export_df[col] = pd.to_numeric(export_df[col], errors="coerce")
+
+    # Build the visible opening-anchor row first.
+    opening_row = {
+        "Date": "-",
+        "Narration": "OPENING BALANCE",
+        "Reference": "-",
+        "Debit": "-",
+        "Credit": "-",
+        "Balance": float(opening_balance),
+    }
+
+    rows = [opening_row]
+    rows.extend(export_df.to_dict("records"))
+    display_df = pd.DataFrame(rows, columns=required)
+
+    # Replace missing movement values with the requested "-" placeholder.
+    for col in ["Debit", "Credit"]:
+        display_df[col] = display_df[col].where(display_df[col].notna(), "-")
+
+    # Formula-driven Balance: F2 is the verified opening anchor; every
+    # transaction row independently recomputes prior balance + credit - debit.
+    # ISNUMBER protects the formula from the "-" placeholders.
+    for excel_row in range(3, len(display_df) + 2):
+        display_df.at[excel_row - 2, "Balance"] = (
+            f'=F{excel_row-1}+IF(ISNUMBER(E{excel_row}),E{excel_row},0)'
+            f'-IF(ISNUMBER(D{excel_row}),D{excel_row},0)'
+        )
+
+    master, fund_flow, concentration, dq, _ = build_master_analysis(source_df)
+    summary = pd.DataFrame({
+        "Metric": [
+            "Source", "Period", "Transactions", "Opening Balance",
+            "Total Credits", "Total Debits", "Net Flow",
+            "Review", "Critical", "Balance Mismatches"
+        ],
+        "Value": [
+            meta.get("source_type", "-"),
+            meta.get("location", "-"),
+            len(source_df),
+            float(opening_balance),
+            credits.fillna(0).sum(),
+            debits.fillna(0).sum(),
+            credits.fillna(0).sum() - debits.fillna(0).sum(),
+            int((source_df.Priority == "REVIEW").sum()),
+            int((source_df.Priority == "CRITICAL").sum()),
+            balance_mismatches(source_df),
+        ],
+    })
+
+    rail = (
+        source_df.groupby("Payment_Rail", dropna=False)
+        .agg(Transactions=("Narration", "size"), Credits=("Credit", "sum"), Debits=("Debit", "sum"))
+        .reset_index()
+        .rename(columns={"Payment_Rail": "Analysis"})
+    )
+    rail.insert(0, "Section", "Payment Rail")
+
+    cat = (
+        source_df.groupby("Category", dropna=False)
+        .agg(Transactions=("Narration", "size"), Credits=("Credit", "sum"), Debits=("Debit", "sum"))
+        .reset_index()
+        .rename(columns={"Category": "Analysis"})
+    )
+    cat.insert(0, "Section", "Category")
+    flow = pd.concat([rail, cat], ignore_index=True)
+
+    with pd.ExcelWriter(out, engine="openpyxl") as w:
+        summary.to_excel(w, index=False, sheet_name="01_Executive_Summary")
+        display_df.to_excel(w, index=False, sheet_name="02_Transactions")
+        flow.to_excel(w, index=False, sheet_name="03_Flow_Analysis")
+
+        master.to_excel(w, index=False, sheet_name="04_Master_Analysis")
+        row = len(master) + 3
+        pd.DataFrame({"Section": ["FUND-FLOW REVIEW"]}).to_excel(
+            w, index=False, sheet_name="04_Master_Analysis", startrow=row - 1
+        )
         if fund_flow.empty:
-            pd.DataFrame({"Result":["No configured large-credit / onward-debit pattern identified."]}).to_excel(w,index=False,sheet_name="04_Master_Analysis",startrow=row); row+=4
+            pd.DataFrame({"Result": ["No configured large-credit / onward-debit pattern identified."]}).to_excel(
+                w, index=False, sheet_name="04_Master_Analysis", startrow=row
+            )
+            row += 4
         else:
-            fund_flow.head(60).to_excel(w,index=False,sheet_name="04_Master_Analysis",startrow=row); row+=min(len(fund_flow),60)+3
-        monthly=df.copy(); monthly["Month"]=monthly["Date"].dt.to_period("M").astype(str)
-        monthly=monthly.groupby("Month",dropna=False).agg(Transactions=("Narration","size"),Credits=("Credit","sum"),Debits=("Debit","sum")).reset_index()
-        pd.DataFrame({"Section":["MONTHLY FLOW"]}).to_excel(w,index=False,sheet_name="04_Master_Analysis",startrow=row-1)
-        monthly.to_excel(w,index=False,sheet_name="04_Master_Analysis",startrow=row); row+=len(monthly)+3
-        pd.DataFrame({"Section":["DATA QUALITY"]}).to_excel(w,index=False,sheet_name="04_Master_Analysis",startrow=row-1)
-        dq.to_excel(w,index=False,sheet_name="04_Master_Analysis",startrow=row); row+=len(dq)+3
-        pd.DataFrame({"Section":["BALANCE RECONCILIATION"]}).to_excel(w,index=False,sheet_name="04_Master_Analysis",startrow=row-1)
-        balance_check(df).to_excel(w,index=False,sheet_name="04_Master_Analysis",startrow=row)
+            fund_flow.head(60).to_excel(
+                w, index=False, sheet_name="04_Master_Analysis", startrow=row
+            )
+            row += min(len(fund_flow), 60) + 3
+
+        monthly = source_df.copy()
+        monthly["Month"] = monthly["Date"].dt.to_period("M").astype(str)
+        monthly = (
+            monthly.groupby("Month", dropna=False)
+            .agg(Transactions=("Narration", "size"), Credits=("Credit", "sum"), Debits=("Debit", "sum"))
+            .reset_index()
+        )
+        pd.DataFrame({"Section": ["MONTHLY FLOW"]}).to_excel(
+            w, index=False, sheet_name="04_Master_Analysis", startrow=row - 1
+        )
+        monthly.to_excel(w, index=False, sheet_name="04_Master_Analysis", startrow=row)
+        row += len(monthly) + 3
+
+        pd.DataFrame({"Section": ["DATA QUALITY"]}).to_excel(
+            w, index=False, sheet_name="04_Master_Analysis", startrow=row - 1
+        )
+        dq.to_excel(w, index=False, sheet_name="04_Master_Analysis", startrow=row)
+        row += len(dq) + 3
+
+        pd.DataFrame({"Section": ["BALANCE RECONCILIATION"]}).to_excel(
+            w, index=False, sheet_name="04_Master_Analysis", startrow=row - 1
+        )
+        balance_check(source_df).to_excel(
+            w, index=False, sheet_name="04_Master_Analysis", startrow=row
+        )
+
         _format_workbook(w.book)
-    out.seek(0); return out.getvalue()
+
+    out.seek(0)
+    return out.getvalue()
 
 
 def build_pdf_report(df, flags, meta, filename):
