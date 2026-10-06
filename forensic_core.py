@@ -1593,12 +1593,33 @@ def analyze_pdf(data, name, progress_callback=None):
             df = original_df
             extraction_method = original_method
 
+    # Establish the opening anchor BEFORE the final gate.
+    # Preferred: an explicit opening/brought-forward balance printed by the source.
+    # Fallback: derive it mathematically from the first verified transaction row:
+    # opening = first reported balance - first credit + first debit.
+    # This is not an invented amount; it is the only opening value implied by
+    # the source's own first transaction balance and movement.
+    opening_balance = source_opening_balance
+    opening_balance_basis = "Source-stated opening balance"
+    if pd.isna(opening_balance) and not df.empty:
+        first = df.iloc[0]
+        first_balance = pd.to_numeric(first.get("Balance"), errors="coerce")
+        first_debit = pd.to_numeric(first.get("Debit"), errors="coerce")
+        first_credit = pd.to_numeric(first.get("Credit"), errors="coerce")
+        if pd.notna(first_balance):
+            opening_balance = (
+                float(first_balance)
+                - (0.0 if pd.isna(first_credit) else float(first_credit))
+                + (0.0 if pd.isna(first_debit) else float(first_debit))
+            )
+            opening_balance_basis = "Derived from first verified transaction balance"
+
     # FINAL DATA-ENTRY GATE:
     # OCR consensus, native position extraction, or an independent fallback
     # must prove that the final ledger is internally consistent before any
     # forensic classification or export is allowed.
     integrity = validate_transaction_integrity(df, extraction_method)
-    validate_opening_anchor(df, source_opening_balance)
+    validate_opening_anchor(df, opening_balance)
     mismatches = integrity["balance_mismatches"]
 
     movement_presence = integrity["movement_rate"]
@@ -1626,33 +1647,19 @@ def analyze_pdf(data, name, progress_callback=None):
     df = _enforce_single_date_schema(enrich(df))
     flags = df[df.Priority.isin(["REVIEW", "CRITICAL"])].copy()
 
-    # Preserve the verified source opening balance for the workbook running-balance
-    # anchor. If the statement has no explicit opening label, derive it from the
-    # first verified transaction balance; never invent an arbitrary starting value.
-    opening_balance = source_opening_balance
-    if pd.isna(opening_balance) and not df.empty:
-        first = df.iloc[0]
-        first_balance = pd.to_numeric(first.get("Balance"), errors="coerce")
-        first_debit = pd.to_numeric(first.get("Debit"), errors="coerce")
-        first_credit = pd.to_numeric(first.get("Credit"), errors="coerce")
-        if pd.notna(first_balance):
-            opening_balance = (
-                float(first_balance)
-                - (0.0 if pd.isna(first_credit) else float(first_credit))
-                + (0.0 if pd.isna(first_debit) else float(first_debit))
-            )
-
     meta = {
         "source_type": "PDF — scanned/OCR" if ratio < 0.5 else "PDF — native/digital",
         "location": f"{pages} pages",
         "layout_confidence": extraction_method,
         "opening_balance": opening_balance,
+        "opening_balance_basis": opening_balance_basis,
         "warnings": [
             f"Extraction method: {extraction_method}.",
             "Debit/Credit values are accepted only from detected transaction columns.",
             "Source_Page is retained for evidence tracing.",
             "Blank amount fields are treated as unknown, not zero.",
             f"Statement-period guard removed {outside_count} extracted row(s) outside the declared transaction period." if outside_count else "All extracted transaction dates fall within the statement's declared period.",
+            f"Opening balance basis: {opening_balance_basis}.",
             "Data-entry integrity gate passed: dates, movement sides and sequential balances validated.",
             "No transaction reaches forensic classification/export until the extraction reconciles.",
 
