@@ -205,10 +205,10 @@ def semantic_narration(t, d=np.nan, c=np.nan):
     # Explicit transfer direction requested by the forensic prompt.
     if re.search(r"\b(?:DEP\s*T(?:R|F)|DEPOSIT\s*T(?:R|F)|DEPOSIT\s*TRANSFER|TFR\s*IN|TRANSFER\s*IN)\b", u):
         party = _name_after_marker(raw, [r"DEP\s*T(?:R|F)", r"DEPOSIT\s*TRANSFER", r"TFR\s*IN", r"TRANSFER\s*IN"])
-        return f"[TRANSFER IN] - {party}" if party else "[TRANSFER IN] - [Not stated]"
+        return f"TRANSFER IN - {party}" if party else "TRANSFER IN"
     if re.search(r"\b(?:WDL\s*T(?:R|F|D)|WITHDRAWAL\s*TRANSFER|TFR\s*OUT|TRANSFER\s*OUT)\b", u):
         party = _name_after_marker(raw, [r"WDL\s*T(?:R|F|D)", r"WITHDRAWAL\s*TRANSFER", r"TFR\s*OUT", r"TRANSFER\s*OUT"])
-        return f"[TRANSFER OUT] - {party}" if party else "[TRANSFER OUT] - [Not stated]"
+        return f"TRANSFER OUT - {party}" if party else "TRANSFER OUT"
 
     # Card/POS: retain the merchant/person name when explicitly present.
     if re.search(r"\b(?:POS|PUR|ECOM\s*PUR|DEBIT\s*CARD|CREDIT\s*CARD|CARD\s*PAYMENT)\b", u):
@@ -1557,6 +1557,11 @@ def validate_transaction_integrity(df, extraction_method):
 
     reconciliation = balance_check(x)
     mismatches = int((reconciliation["Status"] == "MISMATCH").sum()) if not reconciliation.empty else 0
+    gap_count = int((reconciliation["Status"] == "GAP RESET").sum()) if not reconciliation.empty else 0
+    if gap_count:
+        # A GAP RESET is an extraction gap, not a fabricated transaction.
+        # The bank-reported Balance remains authoritative at the reset point.
+        pass
     if mismatches:
         first = reconciliation.loc[reconciliation["Status"] == "MISMATCH"].iloc[0]
         page = first.get("Source_Page", "-")
@@ -1573,6 +1578,7 @@ def validate_transaction_integrity(df, extraction_method):
         "movement_rate": movement_rate,
         "date_reversals": reversals,
         "balance_mismatches": mismatches,
+        "balance_gaps": gap_count,
     }
 
 
@@ -1777,19 +1783,27 @@ def analyze_upload(data, name, progress_callback=None):
 
 
 def balance_check(df, tolerance=0.01):
-    """Reconcile reported balance against previous balance + credit - debit.
+    """Reconcile reported balances without inventing missing transactions.
 
-    Blank Debit/Credit values remain unknown. Such rows are marked
-    INCOMPLETE rather than treating blanks as zero. This prevents extraction
-    gaps from creating artificial red balance errors.
+    If a mismatch occurs but the next transaction(s) reconcile perfectly when
+    anchored to the bank-reported balance at the mismatch row, treat that point
+    as an evidence gap/reset. The missing transaction is NOT fabricated.
     """
     x = df.copy().reset_index(drop=True)
-
     for c in ["Debit", "Credit", "Balance"]:
         x[c] = pd.to_numeric(x[c], errors="coerce")
 
+    def step_ok(prev, row):
+        reported = row["Balance"]
+        if pd.isna(reported):
+            return False
+        debit = 0.0 if pd.isna(row["Debit"]) else float(row["Debit"])
+        credit = 0.0 if pd.isna(row["Credit"]) else float(row["Credit"])
+        return abs(float(reported) - (float(prev) + credit - debit)) <= tolerance
+
     rows = []
     previous_balance = np.nan
+    gap_count = 0
 
     for i, r in x.iterrows():
         reported = r["Balance"]
@@ -1797,29 +1811,35 @@ def balance_check(df, tolerance=0.01):
         credit = r["Credit"]
 
         if pd.isna(reported):
-            status = "NO REPORTED BALANCE"
-            expected = np.nan
-            difference = np.nan
+            status, expected, difference = "NO REPORTED BALANCE", np.nan, np.nan
         elif pd.isna(previous_balance):
-            # First usable balance establishes the opening reference.
-            expected = reported
-            difference = 0.0
-            status = "OPENING / REFERENCE"
+            expected, difference, status = reported, 0.0, "OPENING / REFERENCE"
         elif pd.isna(debit) and pd.isna(credit):
-            # Both movement columns are blank: the source does not provide a
-            # usable movement amount for this row, so reconciliation is incomplete.
-            expected = np.nan
-            difference = np.nan
-            status = "INCOMPLETE — DEBIT/CREDIT UNKNOWN"
+            expected, difference, status = np.nan, np.nan, "INCOMPLETE — DEBIT/CREDIT UNKNOWN"
         else:
-            # Bank statements normally leave the opposite side blank:
-            # a credit row has Debit blank, and a debit row has Credit blank.
-            # For reconciliation only, that structural blank is zero movement.
             debit_value = 0.0 if pd.isna(debit) else float(debit)
             credit_value = 0.0 if pd.isna(credit) else float(credit)
             expected = previous_balance + credit_value - debit_value
             difference = reported - expected
             status = "MATCH" if abs(difference) <= tolerance else "MISMATCH"
+
+            # A missing source row creates a constant balance offset. If the
+            # next two reported rows reconcile from THIS bank-reported balance,
+            # record a gap/reset rather than inventing the missing transaction.
+            if status == "MISMATCH" and pd.notna(reported):
+                lookahead_ok = 0
+                anchor = float(reported)
+                for j in range(i + 1, min(i + 3, len(x))):
+                    nxt = x.iloc[j]
+                    if step_ok(anchor, nxt):
+                        lookahead_ok += 1
+                        anchor = float(nxt["Balance"])
+                    else:
+                        break
+                required = 2 if len(x) - i - 1 >= 2 else 1
+                if lookahead_ok >= required:
+                    status = "GAP RESET"
+                    gap_count += 1
 
         rows.append({
             "Source_Row": r.get("Source_Row", i + 1),
@@ -1836,7 +1856,9 @@ def balance_check(df, tolerance=0.01):
         if pd.notna(reported):
             previous_balance = reported
 
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    out.attrs["gap_count"] = gap_count
+    return out
 
 
 def balance_mismatches(df, tolerance=0.01):
