@@ -1451,6 +1451,7 @@ def analyze_pdf(data, name, progress_callback=None):
     doc = fitz.open(stream=data, filetype="pdf")
     pages = len(doc)
     texts = [p.get_text("text") for p in doc]
+    source_opening_balance = _extract_opening_balance_from_text("\n".join(texts))
     nonempty = sum(bool(t.strip()) for t in texts)
     ratio = nonempty / pages if pages else 0
 
@@ -1587,6 +1588,7 @@ def analyze_pdf(data, name, progress_callback=None):
     # must prove that the final ledger is internally consistent before any
     # forensic classification or export is allowed.
     integrity = validate_transaction_integrity(df, extraction_method)
+    validate_opening_anchor(df, source_opening_balance)
     mismatches = integrity["balance_mismatches"]
 
     movement_presence = integrity["movement_rate"]
@@ -1641,6 +1643,50 @@ def analyze_upload(data, name, progress_callback=None):
     raise ValueError("Unsupported file type. Upload XLSX, XLS, CSV, or PDF.")
 
 
+
+
+
+def _extract_opening_balance_from_text(text):
+    """Read an explicitly printed opening/brought-forward balance if present."""
+    if not text:
+        return np.nan
+    lines = [re.sub(r"\s+", " ", str(line)).strip() for line in str(text).splitlines()]
+    label = re.compile(r"(?i)\b(?:opening balance|opening bal|brought forward|b/f balance|balance b/f|balance brought forward)\b")
+    amount = re.compile(r"(?<!\d)(?:₹\s*)?\(?\d[\d,]*(?:\.\d{1,2})?\)?(?:\s*(?:CR|DR))?\b", re.I)
+    for idx, line in enumerate(lines):
+        if not label.search(line):
+            continue
+        window = " ".join(lines[idx:idx + 2])
+        hits = amount.findall(window)
+        if not hits:
+            continue
+        value = money(hits[-1])
+        if pd.notna(value):
+            return abs(float(value))
+    return np.nan
+
+
+def validate_opening_anchor(df, opening_balance, tolerance=0.01):
+    """Verify the first extracted movement against an explicit source opening balance."""
+    if pd.isna(opening_balance) or df is None or df.empty:
+        return
+    x = df.copy().reset_index(drop=True)
+    for c in ["Debit", "Credit", "Balance"]:
+        x[c] = pd.to_numeric(x[c], errors="coerce")
+    first = x.iloc[0]
+    if pd.isna(first["Balance"]):
+        raise ValueError("Data-entry validation failed: first transaction has no reported balance, so the explicit opening-balance anchor cannot be verified.")
+    debit = 0.0 if pd.isna(first["Debit"]) else float(first["Debit"])
+    credit = 0.0 if pd.isna(first["Credit"]) else float(first["Credit"])
+    expected = float(opening_balance) + credit - debit
+    diff = float(first["Balance"]) - expected
+    if abs(diff) > tolerance:
+        page = first.get("Source_Page", "-")
+        raise ValueError(
+            f"Data-entry validation failed: opening-balance anchor mismatch on source page {page}. "
+            f"Source opening balance {opening_balance:,.2f}, first reported balance {float(first['Balance']):,.2f}, "
+            f"expected {expected:,.2f}, difference {diff:,.2f}. No amount was changed."
+        )
 
 
 def balance_check(df, tolerance=0.01):
