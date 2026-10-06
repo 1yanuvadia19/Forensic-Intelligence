@@ -180,7 +180,7 @@ st.caption(
     f"{len(file_bytes):,} bytes"
 )
 
-st.caption("ENGINE BUILD: 2026-10-06-no-opening-balance-v8")
+st.caption(f"ENGINE BUILD: {ANALYSIS_ENGINE_VERSION}")
 
 # Reuse the result for the same uploaded evidence instead of re-running
 # the entire PDF pipeline on every Streamlit rerun.
