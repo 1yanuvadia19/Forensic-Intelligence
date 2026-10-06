@@ -396,6 +396,21 @@ def _normalize_reference_fields(df):
     return x
 
 
+def _humanize_legacy_narration(value, debit=np.nan, credit=np.nan):
+    """Convert any legacy bracket-style labels into the current human particulars.
+
+    This is a defensive export-layer cleanup so an older cached analysis can
+    never reappear as [UPI Payment], [Debit / Expense], or [Credit / Receipt].
+    It does not alter amounts, dates, references, or source evidence.
+    """
+    raw = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not raw:
+        return "-"
+    raw = re.sub(r"^\[(?:UPI Payment|UPI|Net Banking)\]\s*", "", raw, flags=re.I)
+    raw = re.sub(r"^\[(?:Debit / Expense|Debit|Expense)\]\s*", "", raw, flags=re.I)
+    raw = re.sub(r"^\[(?:Credit / Receipt|Credit|Receipt)\]\s*", "", raw, flags=re.I)
+    return semantic_narration(raw, debit, credit)
+
 def enrich(df):
     x = df.copy()
     x = _normalize_reference_fields(x)
@@ -2055,6 +2070,11 @@ def build_workbook(df, flags, meta):
     export_df = export_df[[c for c in required if c in export_df.columns]].copy()
 
     # Missing textual values are explicit placeholders, not silent blanks.
+    if "Narration" in export_df.columns:
+        export_df["Narration"] = [
+            _humanize_legacy_narration(t, d, c)
+            for t, d, c in zip(export_df["Narration"], export_df["Debit"], export_df["Credit"])
+        ]
     for col in ["Narration", "Reference"]:
         if col in export_df.columns:
             export_df[col] = export_df[col].replace(r"^\s*$", "-", regex=True).fillna("-")
