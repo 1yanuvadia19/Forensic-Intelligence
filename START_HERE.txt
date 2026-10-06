@@ -1,9 +1,14 @@
-FORENSIC INTELLIGENCE — MASTER BLASTER v2
+FORENSIC INTELLIGENCE — MASTER BLASTER v13
 
 ONE-CLICK:
 Double-click START_FORENSIC_TOOL.vbs
 
 No manual Command Prompt commands are required.
 
-Benchmark files are in CASE_BENCHMARKS.
+Inputs:
+XLSX / XLS / CSV / native PDF / scanned or hybrid PDF
+
+v13 principle:
+Claude-style forensic normalization + evidence-first extraction + deterministic balance validation.
+
 Do not commit confidential case files or API keys to GitHub.
