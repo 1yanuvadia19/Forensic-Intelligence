@@ -1473,10 +1473,6 @@ def analyze_pdf(data, name, progress_callback=None):
     nonempty = sum(bool(t.strip()) for t in texts)
     ratio = nonempty / pages if pages else 0
 
-    source_opening_balance = _extract_opening_balance_from_text("\n".join(texts))
-    if pd.isna(source_opening_balance) and ratio < 0.5:
-        source_opening_balance = _extract_opening_balance_from_ocr(data)
-
     if progress_callback:
         progress_callback(0, max(pages, 1), "Detecting PDF type and layout")
 
@@ -1605,33 +1601,11 @@ def analyze_pdf(data, name, progress_callback=None):
             df = original_df
             extraction_method = original_method
 
-    # Establish the opening anchor BEFORE the final gate.
-    # Preferred: an explicit opening/brought-forward balance printed by the source.
-    # Fallback: derive it mathematically from the first verified transaction row:
-    # opening = first reported balance - first credit + first debit.
-    # This is not an invented amount; it is the only opening value implied by
-    # the source's own first transaction balance and movement.
-    opening_balance = source_opening_balance
-    opening_balance_basis = "Source-stated opening balance"
-    if pd.isna(opening_balance) and not df.empty:
-        first = df.iloc[0]
-        first_balance = pd.to_numeric(first.get("Balance"), errors="coerce")
-        first_debit = pd.to_numeric(first.get("Debit"), errors="coerce")
-        first_credit = pd.to_numeric(first.get("Credit"), errors="coerce")
-        if pd.notna(first_balance):
-            opening_balance = (
-                float(first_balance)
-                - (0.0 if pd.isna(first_credit) else float(first_credit))
-                + (0.0 if pd.isna(first_debit) else float(first_debit))
-            )
-            opening_balance_basis = "Derived from first verified transaction balance"
-
     # FINAL DATA-ENTRY GATE:
     # OCR consensus, native position extraction, or an independent fallback
     # must prove that the final ledger is internally consistent before any
     # forensic classification or export is allowed.
     integrity = validate_transaction_integrity(df, extraction_method)
-    validate_opening_anchor(df, opening_balance)
     mismatches = integrity["balance_mismatches"]
 
     movement_presence = integrity["movement_rate"]
@@ -1663,15 +1637,12 @@ def analyze_pdf(data, name, progress_callback=None):
         "source_type": "PDF — scanned/OCR" if ratio < 0.5 else "PDF — native/digital",
         "location": f"{pages} pages",
         "layout_confidence": extraction_method,
-        "opening_balance": opening_balance,
-        "opening_balance_basis": opening_balance_basis,
         "warnings": [
             f"Extraction method: {extraction_method}.",
             "Debit/Credit values are accepted only from detected transaction columns.",
             "Source_Page is retained for evidence tracing.",
             "Blank amount fields are treated as unknown, not zero.",
             f"Statement-period guard removed {outside_count} extracted row(s) outside the declared transaction period." if outside_count else "All extracted transaction dates fall within the statement's declared period.",
-            f"Opening balance basis: {opening_balance_basis}.",
             "Data-entry integrity gate passed: dates, movement sides and sequential balances validated.",
             "No transaction reaches forensic classification/export until the extraction reconciles.",
 
@@ -1691,69 +1662,6 @@ def analyze_upload(data, name, progress_callback=None):
 
 
 
-
-
-def _extract_opening_balance_from_ocr(data):
-    """Conservative OCR fallback for an explicitly labelled opening balance."""
-    try:
-        import fitz
-        import pytesseract
-        from PIL import Image, ImageOps
-        doc = fitz.open(stream=data, filetype="pdf")
-        for page in list(doc)[:2]:
-            pix = page.get_pixmap(matrix=fitz.Matrix(1.6, 1.6), alpha=False)
-            image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            gray = ImageOps.grayscale(image)
-            text = pytesseract.image_to_string(gray, config="--psm 6")
-            value = _extract_opening_balance_from_text(text)
-            if pd.notna(value):
-                return value
-    except Exception:
-        return np.nan
-    return np.nan
-
-
-def _extract_opening_balance_from_text(text):
-    """Read an explicitly printed opening/brought-forward balance if present."""
-    if not text:
-        return np.nan
-    lines = [re.sub(r"\s+", " ", str(line)).strip() for line in str(text).splitlines()]
-    label = re.compile(r"(?i)\b(?:opening balance|opening bal|brought forward|b/f balance|balance b/f|balance brought forward)\b")
-    amount = re.compile(r"(?<!\d)(?:₹\s*)?\(?\d[\d,]*(?:\.\d{1,2})?\)?(?:\s*(?:CR|DR))?\b", re.I)
-    for idx, line in enumerate(lines):
-        if not label.search(line):
-            continue
-        window = " ".join(lines[idx:idx + 2])
-        hits = amount.findall(window)
-        if not hits:
-            continue
-        value = money(hits[-1])
-        if pd.notna(value):
-            return abs(float(value))
-    return np.nan
-
-
-def validate_opening_anchor(df, opening_balance, tolerance=0.01):
-    """Verify the first extracted movement against an explicit source opening balance."""
-    if pd.isna(opening_balance) or df is None or df.empty:
-        return
-    x = df.copy().reset_index(drop=True)
-    for c in ["Debit", "Credit", "Balance"]:
-        x[c] = pd.to_numeric(x[c], errors="coerce")
-    first = x.iloc[0]
-    if pd.isna(first["Balance"]):
-        raise ValueError("Data-entry validation failed: first transaction has no reported balance, so the explicit opening-balance anchor cannot be verified.")
-    debit = 0.0 if pd.isna(first["Debit"]) else float(first["Debit"])
-    credit = 0.0 if pd.isna(first["Credit"]) else float(first["Credit"])
-    expected = float(opening_balance) + credit - debit
-    diff = float(first["Balance"]) - expected
-    if abs(diff) > tolerance:
-        page = first.get("Source_Page", "-")
-        raise ValueError(
-            f"Data-entry validation failed: opening-balance anchor mismatch on source page {page}. "
-            f"Source opening balance {opening_balance:,.2f}, first reported balance {float(first['Balance']):,.2f}, "
-            f"expected {expected:,.2f}, difference {diff:,.2f}. No amount was changed."
-        )
 
 
 def balance_check(df, tolerance=0.01):
@@ -1958,12 +1866,11 @@ def _format_workbook(wb):
             cell.border=border
 
 def build_workbook(df, flags, meta):
-    """Build the evidence export with an explicit opening anchor and formula balance.
+    """Build the evidence export from verified transaction rows.
 
-    The source Balance column is used for the hard reconciliation gate before this
-    function is called. In the exported transaction sheet, Balance is deliberately
-    formula-driven so the workbook itself independently recomputes the running
-    balance from the verified opening balance + Credit - Debit.
+    The first verified transaction retains its reported source Balance.
+    Subsequent Balance cells are formula-driven from the previous row + Credit - Debit.
+    No separate opening-balance feature or opening row is used.
     """
     out = io.BytesIO()
     source_df = df.copy()
@@ -1972,7 +1879,6 @@ def build_workbook(df, flags, meta):
     credits = pd.to_numeric(source_df["Credit"], errors="coerce")
     debits = pd.to_numeric(source_df["Debit"], errors="coerce")
 
-    # Export does not require a separate opening-balance feature.
     # The first verified transaction keeps its source Balance; subsequent rows
     # calculate previous balance + Credit - Debit.
     
@@ -1994,7 +1900,6 @@ def build_workbook(df, flags, meta):
         export_df[col] = pd.to_numeric(export_df[col], errors="coerce")
 
     # Keep the first verified source balance as the first ledger balance.
-    # No OPENING BALANCE row is created and no zero/arbitrary anchor is invented.
     display_df = export_df.copy()
 
     # Missing Debit/Credit values are displayed as "-".
