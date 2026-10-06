@@ -1,5 +1,7 @@
 import io
 import re
+import os
+import json
 from pathlib import Path
 
 import numpy as np
@@ -1109,48 +1111,133 @@ def _ocr_pdf_position_rows(data, progress_callback=None, ocr_psm=6):
 
     return result
 
+def _claude_visual_verify(data, ocr_df, progress_callback=None):
+    """Claude vision verifies OCR candidates against the original page image."""
+    key = os.getenv("ANTHROPIC_API_KEY")
+    if not key:
+        raise RuntimeError(
+            "Claude visual verification is not configured. Add ANTHROPIC_API_KEY "
+            "to Streamlit secrets before processing scanned PDFs."
+        )
+    import base64
+    import fitz
+    import anthropic
+
+    model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929")
+    client = anthropic.Anthropic(api_key=key)
+    doc = fitz.open(stream=data, filetype="pdf")
+    verified = []
+
+    pages = sorted(int(p) for p in ocr_df["Source_Page"].dropna().unique())
+    for n, page_no in enumerate(pages, 1):
+        if progress_callback:
+            progress_callback(n - 1, max(len(pages), 1),
+                              f"Claude visual verification page {page_no}/{len(doc)}")
+
+        pix = doc[page_no - 1].get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+        image_b64 = base64.b64encode(pix.tobytes("jpeg")).decode("ascii")
+
+        candidates = []
+        for idx, row in ocr_df[ocr_df["Source_Page"] == page_no].iterrows():
+            candidates.append({
+                "row_id": int(idx),
+                "date": pd.Timestamp(row["Date"]).strftime("%d-%m-%Y") if pd.notna(row["Date"]) else "",
+                "narration": str(row["Narration"] or ""),
+                "reference": str(row["Reference"] or ""),
+                "debit": float(row["Debit"]) if pd.notna(row["Debit"]) else None,
+                "credit": float(row["Credit"]) if pd.notna(row["Credit"]) else None,
+                "balance": float(row["Balance"]) if pd.notna(row["Balance"]) else None,
+            })
+
+        prompt = """You are a forensic bank-statement transcription verifier.
+Read ONLY the attached statement page image and compare it with the OCR candidates.
+Return ONLY JSON with this exact shape:
+{"rows":[{"row_id":0,"date":"DD-MM-YYYY","narration":"exact readable text","reference":"exact readable reference or empty","debit":0,"credit":null,"balance":0,"status":"VERIFIED"}]}
+Rules: read from the image; correct OCR only when clearly visible; never invent;
+never swap debit/credit just to force balance; use null/empty when unreadable;
+do not add transactions not represented by candidate rows; mark uncertain rows UNCERTAIN.
+OCR CANDIDATES:
+""" + json.dumps(candidates, ensure_ascii=False)
+
+        try:
+            response = client.messages.create(
+                model=model,
+                max_tokens=12000,
+                temperature=0,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "source": {
+                            "type": "base64", "media_type": "image/jpeg", "data": image_b64
+                        }},
+                        {"type": "text", "text": prompt},
+                    ],
+                }],
+            )
+            response_text = "\n".join(
+                block.text for block in response.content
+                if getattr(block, "type", "") == "text"
+            ).strip()
+            response_text = re.sub(r"^json\s*", "", response_text, flags=re.I)
+            parsed = json.loads(response_text)
+        except Exception as exc:
+            raise RuntimeError(f"Claude visual verification failed on page {page_no}: {exc}")
+
+        rows = parsed.get("rows") if isinstance(parsed, dict) else None
+        if not isinstance(rows, list):
+            raise RuntimeError(f"Claude returned invalid verification JSON on page {page_no}.")
+
+        for row in rows:
+            if not isinstance(row, dict) or str(row.get("status", "")).upper() != "VERIFIED":
+                continue
+            try:
+                verified.append({
+                    "Date": pd.to_datetime(str(row.get("date", "")), dayfirst=True, errors="coerce"),
+                    "Value_Date": pd.NaT,
+                    "Narration": str(row.get("narration", "") or "").strip(),
+                    "Reference": str(row.get("reference", "") or "").strip(),
+                    "Debit": float(row["debit"]) if row.get("debit") is not None else np.nan,
+                    "Credit": float(row["credit"]) if row.get("credit") is not None else np.nan,
+                    "Balance": float(row["balance"]) if row.get("balance") is not None else np.nan,
+                    "Source_Page": page_no,
+                    "_row_id": int(row["row_id"]),
+                })
+            except Exception:
+                continue
+
+    if not verified:
+        raise RuntimeError("Claude could not verify any transaction rows.")
+
+    result = pd.DataFrame(verified)
+    result = result.sort_values(["Source_Page", "_row_id"]).drop_duplicates(
+        subset=["Source_Page", "_row_id"], keep="first"
+    ).reset_index(drop=True)
+    return result.drop(columns=["_row_id"])
+
+
 def _ocr_consensus_extract(data, progress_callback=None):
-    """Run two independent OCR layouts and accept only a mathematically proven ledger.
-
-    Pass 1 and Pass 2 use different Tesseract page-segmentation strategies. The
-    second pass is not a correction layer: it is an independent reading used to
-    detect OCR/date/column errors. A candidate is accepted only when the full
-    transaction ledger passes the same hard integrity gate used for native PDFs.
-    """
+    """Two OCR readings -> Claude visual verification -> mathematical proof."""
     candidates = []
-    errors = []
-
     for psm in (6, 4):
         try:
             candidate = _ocr_pdf_position_rows(
-                data,
-                progress_callback=progress_callback,
-                ocr_psm=psm,
+                data, progress_callback=progress_callback, ocr_psm=psm
             )
             if candidate is None or candidate.empty:
-                errors.append(f"psm{psm}: no rows")
                 continue
-
             candidate = candidate[candidate["Date"].notna()].copy()
             candidate = _repair_pdf_side_mapping(candidate)
-            integrity = validate_transaction_integrity(
-                candidate,
-                f"OCR independent pass (psm {psm})",
-            )
+            integrity = validate_transaction_integrity(candidate, f"OCR independent pass (psm {psm})")
             candidates.append((candidate, integrity, psm))
-        except Exception as exc:
-            errors.append(f"psm{psm}: {str(exc)}")
+        except Exception:
+            continue
 
     if not candidates:
-        detail = " | ".join(errors[:2])
         raise ValueError(
             "Scanned PDF could not be independently verified. "
-            "Two OCR readings were attempted, but neither produced a "
-            f"mathematically reconciled transaction ledger. {detail}"
+            "Neither deterministic OCR pass produced a mathematically reconciled ledger."
         )
 
-    # Prefer the candidate with the strongest evidence coverage; both accepted
-    # candidates have already passed the hard reconciliation gate.
     candidates.sort(
         key=lambda item: (
             item[1]["movement_rate"],
@@ -1159,9 +1246,15 @@ def _ocr_consensus_extract(data, progress_callback=None):
         ),
         reverse=True,
     )
-    best_df, best_integrity, best_psm = candidates[0]
+    base_df, _, best_psm = candidates[0]
 
-    return best_df, best_integrity, f"OCR consensus verification (psm {best_psm})"
+    claude_df = _claude_visual_verify(data, base_df, progress_callback=progress_callback)
+    claude_df = _repair_pdf_side_mapping(claude_df)
+    integrity = validate_transaction_integrity(
+        claude_df,
+        f"Claude visual verification + OCR candidate (psm {best_psm})",
+    )
+    return claude_df, integrity, f"Claude visual verification + independent OCR consensus (psm {best_psm})"
 
 
 def _repair_pdf_side_mapping(df, tolerance=0.01):
