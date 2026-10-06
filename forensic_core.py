@@ -1076,13 +1076,19 @@ def _ocr_pdf_position_rows(data, progress_callback=None, ocr_psm=6):
                     if column:
                         buckets[column].append(word["text"])
 
-                dt = pd.to_datetime(
-                    date_match.group(0)
-                    .replace(".", "-")
-                    .replace("/", "-"),
-                    dayfirst=True,
-                    errors="coerce",
-                )
+                row_dates = [
+                    m.group(0).replace(".", "-").replace("/", "-")
+                    for m in date_re.finditer(line)
+                ]
+                post_text = row_dates[0] if row_dates else ""
+                value_text = row_dates[1] if len(row_dates) > 1 else ""
+                post_dt = pd.to_datetime(
+                    post_text, dayfirst=True, errors="coerce"
+                ) if post_text else pd.NaT
+                value_dt = pd.to_datetime(
+                    value_text, dayfirst=True, errors="coerce"
+                ) if value_text else pd.NaT
+                dt = value_dt if pd.isna(post_dt) and pd.notna(value_dt) else post_dt
                 if pd.isna(dt):
                     continue
 
@@ -1098,7 +1104,7 @@ def _ocr_pdf_position_rows(data, progress_callback=None, ocr_psm=6):
 
                 all_rows.append({
                     "Date": dt,
-                    "Value_Date": pd.NaT,
+                    "Value_Date": value_dt,
                     "Narration": narration,
                     "Reference": reference,
                     "Debit": debit_value,
