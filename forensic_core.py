@@ -1868,9 +1868,9 @@ def _format_workbook(wb):
 def build_workbook(df, flags, meta):
     """Build the evidence export from verified transaction rows.
 
-    The first verified transaction retains its reported source Balance.
-    Subsequent Balance cells are formula-driven from the previous row + Credit - Debit.
-    No separate opening-balance feature or opening row is used.
+    All transaction values, including Balance, are exported as data exactly as
+    extracted from the statement. No opening-balance feature and no Excel
+    running-balance formulas are used.
     """
     out = io.BytesIO()
     source_df = df.copy()
@@ -1906,13 +1906,9 @@ def build_workbook(df, flags, meta):
     for col in ["Debit", "Credit"]:
         display_df[col] = display_df[col].where(display_df[col].notna(), "-")
 
-    # From the second transaction onward:
-    # previous balance + Credit - Debit.
-    for excel_row in range(3, len(display_df) + 2):
-        display_df.at[excel_row - 2, "Balance"] = (
-            f'=F{excel_row-1}+IF(ISNUMBER(E{excel_row}),E{excel_row},0)'
-            f'-IF(ISNUMBER(D{excel_row}),D{excel_row},0)'
-        )
+    # Balance is exported exactly as extracted from the bank statement.
+    # No Excel formulas are inserted; this workbook is a data-entry/evidence export.
+    display_df["Balance"] = pd.to_numeric(display_df["Balance"], errors="coerce")
 
     master, fund_flow, concentration, dq, _ = build_master_analysis(source_df)
     summary = pd.DataFrame({
