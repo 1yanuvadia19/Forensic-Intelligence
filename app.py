@@ -10,7 +10,7 @@ from forensic_core import analyze_upload, build_workbook, build_master_analysis,
 
 # Bump this whenever extraction/export logic changes. It prevents Streamlit from
 # reusing a stale in-memory result after a forensic-engine update.
-ANALYSIS_ENGINE_VERSION = "2026-10-06-no-opening-balance-v7"
+ANALYSIS_ENGINE_VERSION = "2026-10-06-no-opening-balance-v8-FORCE-RESTART"
 
 
 # ============================================================
@@ -179,6 +179,8 @@ st.caption(
     f"Evidence loaded: **{file_name}** • "
     f"{len(file_bytes):,} bytes"
 )
+
+st.caption("ENGINE BUILD: 2026-10-06-no-opening-balance-v8")
 
 # Reuse the result for the same uploaded evidence instead of re-running
 # the entire PDF pipeline on every Streamlit rerun.
