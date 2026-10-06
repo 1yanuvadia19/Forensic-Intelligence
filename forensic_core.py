@@ -222,8 +222,51 @@ def counterparty(t):
     return ""
 
 
+def _normalize_reference_fields(df):
+    """Separate reference-like identifiers from visual column spillover.
+
+    Bank PDFs frequently let long narration text drift into the Chq/Ref column.
+    Keep the original narration evidence, but make the Reference field contain
+    the identifier-like token(s) actually useful for reconciliation.
+    """
+    x = df.copy()
+    ref_pattern = re.compile(
+        r"(?i)(?:\\b(?:UPI|IMPS|NEFT|RTGS|NACH|ECS|ACH|CLIN|DAP|FINANCE|UTR|RRN|REF|TRN|TXN|CHQ|CHEQUE|CTS)[/_:\\-]?[A-Z0-9][A-Z0-9/_:\\-]{4,}|\\b\\d{8,}\\b)"
+    )
+
+    for i in x.index:
+        narr = str(x.at[i, "Narration"] or "").strip()
+        ref = str(x.at[i, "Reference"] or "").strip()
+
+        matches = ref_pattern.findall(ref)
+        if matches:
+            cleaned_ref = " ".join(dict.fromkeys(m.strip() for m in matches if m.strip()))
+            leftovers = ref
+            for m in matches:
+                leftovers = re.sub(re.escape(m), " ", leftovers, count=1)
+            leftovers = re.sub(r"\\s+", " ", leftovers).strip(" -:/")
+            if leftovers and leftovers.lower() not in {"ph", "no", "na", "n a"}:
+                narr = f"{narr} {leftovers}".strip()
+            elif leftovers.lower() == "ph":
+                narr = f"{narr} Ph".strip()
+            ref = cleaned_ref
+        elif not ref:
+            # When a statement has no dedicated reference column, recover an
+            # explicit identifier from narration without deleting it from the
+            # original narration evidence.
+            found = ref_pattern.findall(narr)
+            if found:
+                ref = " ".join(dict.fromkeys(m.strip() for m in found if m.strip()))
+
+        x.at[i, "Narration"] = narr
+        x.at[i, "Reference"] = ref
+
+    return x
+
+
 def enrich(df):
     x = df.copy()
+    x = _normalize_reference_fields(x)
     x["Payment_Rail"] = [rail(v) for v in x["Narration"]]
     x["Counterparty"] = x["Narration"].map(counterparty)
     x["Category"] = [category(t, d, c) for t, d, c in zip(x.Narration, x.Debit, x.Credit)]
