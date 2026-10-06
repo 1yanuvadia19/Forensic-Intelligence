@@ -1919,9 +1919,9 @@ def _format_workbook(wb):
         for row in ws.iter_rows():
             for cell in row:
                 cell.font=Font(name="Bookman Old Style",size=10,bold=False)
-                if ws.title == "02_Transactions" and cell.column in (1, 2):
+                if ws.title == "02_Transactions" and cell.column == 1:
                     cell.number_format = "dd-mm-yyyy"
-                if ws.title == "02_Transactions" and cell.column in (5, 6, 7):
+                if ws.title == "02_Transactions" and cell.column in (4, 5, 6):
                     cell.number_format = "#,##0.00"
                 cell.alignment=Alignment(vertical="top",wrap_text=False)
                 cell.border=border
