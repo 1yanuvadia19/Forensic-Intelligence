@@ -1473,9 +1473,73 @@ def analyze_pdf(data, name, progress_callback=None):
     if df.empty:
         raise ValueError("PDF extraction produced no transactions inside the statement's declared period.")
 
+    # MASTER-BLASTER RECOVERY:
+    # A non-empty native extraction is not automatically the best extraction.
+    # If its ledger does not reconcile, try independent table reconstruction and
+    # deterministic OCR before stopping. A candidate is accepted only if it
+    # independently passes the same hard integrity gate. This improves coverage
+    # without weakening evidence standards.
+    if balance_mismatches(df) > 0:
+        original_df = df.copy()
+        original_method = extraction_method
+        candidates = []
+
+        try:
+            table_candidate = _native_pdf_tables(data)
+            if table_candidate is not None and not table_candidate.empty:
+                candidates.append(("Native PDF table reconstruction", table_candidate))
+        except Exception:
+            pass
+
+        try:
+            ocr_candidate, _, ocr_method = _ocr_consensus_extract(
+                data,
+                progress_callback=progress_callback,
+            )
+            if ocr_candidate is not None and not ocr_candidate.empty:
+                candidates.append((ocr_method, ocr_candidate))
+        except Exception:
+            pass
+
+        recovered = False
+        for candidate_method, candidate_df in candidates:
+            try:
+                candidate_df = candidate_df[candidate_df["Date"].notna()].copy()
+                candidate_df = _repair_pdf_side_mapping(candidate_df)
+
+                if period_start is not None and period_end is not None:
+                    candidate_df = candidate_df.loc[
+                        (candidate_df["Date"] >= period_start) &
+                        (candidate_df["Date"] <= period_end)
+                    ].copy()
+
+                if candidate_df.empty:
+                    continue
+
+                # Do not accept a candidate merely because it has more rows.
+                # It must pass the complete evidence gate.
+                candidate_integrity = validate_transaction_integrity(
+                    candidate_df,
+                    candidate_method,
+                )
+                df = candidate_df
+                extraction_method = candidate_method
+                integrity = candidate_integrity
+                recovered = True
+                break
+            except Exception:
+                continue
+
+        if not recovered:
+            # Keep the original candidate so the final error reports the exact
+            # first mismatch and provenance instead of hiding the failure.
+            df = original_df
+            extraction_method = original_method
+
     # FINAL DATA-ENTRY GATE:
-    # OCR consensus and native extraction both prove that the ledger is internally
-    # consistent before any forensic classification or export is allowed.
+    # OCR consensus, native position extraction, or an independent fallback
+    # must prove that the final ledger is internally consistent before any
+    # forensic classification or export is allowed.
     integrity = validate_transaction_integrity(df, extraction_method)
     mismatches = integrity["balance_mismatches"]
 
