@@ -427,6 +427,7 @@ def _native_pdf_position_rows(data, progress_callback=None):
     frames = []
 
     date_re = re.compile(r"\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b")
+    partial_date_re = re.compile(r"^\s*(\d{1,2}[-/.]\d{1,2}[-/.])")
     amount_re = re.compile(r"^(?:₹\s*)?\(?\d[\d,]*(?:\.\d+)?\)?(?:\s*(?:CR|DR))?$", re.I)
 
     def ykey(word):
@@ -548,12 +549,17 @@ def _native_pdf_position_rows(data, progress_callback=None):
 
         for y, ws in sorted(lines.items()):
             # Continuation pages can contain valid transactions ABOVE the
-            # repeated column header. Do not discard those rows by Y-position.
-            # A genuine transaction row must begin with a date; this excludes
-            # footer/header metadata such as "BANK OF BARODA Date :17-03-2026".
+            # repeated column header. A digital PDF can also split the final
+            # date token across a page boundary, e.g. "07-04-" at the bottom
+            # of one page and "2024" at the top of the next page.
             ws = clean_words(ws)
             line_text = " ".join(w[4] for w in ws).strip()
-            if not re.match(r"^\s*\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b", line_text):
+            full_date_start = re.match(
+                r"^\\s*\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}\\b",
+                line_text
+            )
+            partial_date_start = partial_date_re.match(line_text)
+            if not full_date_start and not partial_date_start:
                 continue
 
             # Ignore repeated column headers / footer lines.
@@ -568,11 +574,30 @@ def _native_pdf_position_rows(data, progress_callback=None):
 
             date_text = " ".join(buckets.get("date", []))
             dm = date_re.search(date_text) or date_re.search(line_text)
-            if not dm:
+
+            # Evidence-backed repair for a page-split date. The day/month is
+            # present on this page and the four-digit year is explicitly present
+            # at the start of the next page. No amount is altered.
+            inferred_date_text = None
+            if not dm and partial_date_start:
+                partial_prefix = partial_date_start.group(1)
+                next_year = None
+                if page_no < len(doc):
+                    next_words = clean_words(doc[page_no].get_text("words"))
+                    for nw in next_words:
+                        token = str(nw[4]).strip()
+                        if re.fullmatch(r"20\\d{2}", token) and nw[1] > 400:
+                            next_year = token
+                            break
+                if next_year:
+                    inferred_date_text = partial_prefix + next_year
+
+            date_token = dm.group(0) if dm else inferred_date_text
+            if not date_token:
                 continue
 
             date_value = pd.to_datetime(
-                dm.group(0).replace(".", "-").replace("/", "-"),
+                date_token.replace(".", "-").replace("/", "-"),
                 dayfirst=True,
                 errors="coerce",
             )
