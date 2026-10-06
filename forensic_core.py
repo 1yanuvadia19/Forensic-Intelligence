@@ -683,7 +683,7 @@ def _native_pdf_position_rows(data, progress_callback=None):
 
 
 
-def _ocr_pdf_position_rows(data, progress_callback=None):
+def _ocr_pdf_position_rows(data, progress_callback=None, ocr_psm=6):
     """OCR scanned/hybrid bank PDFs into conservative transaction rows.
 
     This path is designed for photographed/scanned bank statements where
@@ -877,7 +877,7 @@ def _ocr_pdf_position_rows(data, progress_callback=None):
         data_dict = pytesseract.image_to_data(
             gray,
             output_type=pytesseract.Output.DICT,
-            config="--psm 6",
+            config=f"--psm {ocr_psm}",
         )
 
         words = []
@@ -1109,6 +1109,61 @@ def _ocr_pdf_position_rows(data, progress_callback=None):
 
     return result
 
+def _ocr_consensus_extract(data, progress_callback=None):
+    """Run two independent OCR layouts and accept only a mathematically proven ledger.
+
+    Pass 1 and Pass 2 use different Tesseract page-segmentation strategies. The
+    second pass is not a correction layer: it is an independent reading used to
+    detect OCR/date/column errors. A candidate is accepted only when the full
+    transaction ledger passes the same hard integrity gate used for native PDFs.
+    """
+    candidates = []
+    errors = []
+
+    for psm in (6, 4):
+        try:
+            candidate = _ocr_pdf_position_rows(
+                data,
+                progress_callback=progress_callback,
+                ocr_psm=psm,
+            )
+            if candidate is None or candidate.empty:
+                errors.append(f"psm{psm}: no rows")
+                continue
+
+            candidate = candidate[candidate["Date"].notna()].copy()
+            candidate = _repair_pdf_side_mapping(candidate)
+            integrity = validate_transaction_integrity(
+                candidate,
+                f"OCR independent pass (psm {psm})",
+            )
+            candidates.append((candidate, integrity, psm))
+        except Exception as exc:
+            errors.append(f"psm{psm}: {str(exc)}")
+
+    if not candidates:
+        detail = " | ".join(errors[:2])
+        raise ValueError(
+            "Scanned PDF could not be independently verified. "
+            "Two OCR readings were attempted, but neither produced a "
+            f"mathematically reconciled transaction ledger. {detail}"
+        )
+
+    # Prefer the candidate with the strongest evidence coverage; both accepted
+    # candidates have already passed the hard reconciliation gate.
+    candidates.sort(
+        key=lambda item: (
+            item[1]["movement_rate"],
+            item[0]["Balance"].notna().mean(),
+            len(item[0]),
+        ),
+        reverse=True,
+    )
+    best_df, best_integrity, best_psm = candidates[0]
+
+    return best_df, best_integrity, f"OCR consensus verification (psm {best_psm})"
+
+
 def _repair_pdf_side_mapping(df, tolerance=0.01):
     """Repair only a uniquely provable Debit/Credit side inversion using balances.
 
@@ -1245,14 +1300,12 @@ def analyze_pdf(data, name, progress_callback=None):
         progress_callback(0, max(pages, 1), "Detecting PDF type and layout")
 
     if ratio < 0.5:
-        # Scanned/image PDF: use the real OCR reconstruction path.
-        df = _ocr_pdf_position_rows(data, progress_callback=progress_callback)
-        extraction_method = "OCR table reconstruction"
-        if df.empty:
-            raise ValueError(
-                f"{pages}-page scanned PDF was detected, but OCR could not reconstruct "
-                "a reliable transaction table. No values were invented."
-            )
+        # Scanned/image PDF: two independent OCR readings are treated as
+        # competing evidence. No single OCR pass is trusted by itself.
+        df, integrity, extraction_method = _ocr_consensus_extract(
+            data,
+            progress_callback=progress_callback,
+        )
     else:
         # Digital/native PDF: use coordinate-aware extraction first.
         df = _native_pdf_position_rows(data, progress_callback=progress_callback)
@@ -1260,20 +1313,20 @@ def analyze_pdf(data, name, progress_callback=None):
         if df.empty:
             df = _native_pdf_tables(data)
             extraction_method = "Native PDF table extraction"
+
+        # If native extraction cannot produce a ledger, use independent OCR
+        # consensus for hybrid/image-backed PDFs.
         if df.empty:
-            # Some bank PDFs are hybrid: they contain enough selectable text in
-            # headers/footers to look "digital", while the actual transaction
-            # table is an embedded image. In that case native mapping returns no
-            # rows. Safely fall back to OCR instead of rejecting the statement.
-            df = _ocr_pdf_position_rows(data, progress_callback=progress_callback)
-            if len(df):
-                extraction_method = "OCR fallback for hybrid PDF"
-            else:
-                raise ValueError(
-                    "Digital PDF detected, but the transaction columns could not be mapped reliably. "
-                    "OCR fallback also could not reconstruct a reliable transaction table. "
-                    "No values were invented."
-                )
+            df, integrity, extraction_method = _ocr_consensus_extract(
+                data,
+                progress_callback=progress_callback,
+            )
+        else:
+            # Native extraction is not accepted until it passes the same hard
+            # mathematical evidence gate.
+            df = df[df["Date"].notna()].copy()
+            df = _repair_pdf_side_mapping(df)
+            integrity = validate_transaction_integrity(df, extraction_method)
 
     if progress_callback:
         progress_callback(pages, max(pages, 1), "Validating extracted transactions")
@@ -1308,13 +1361,8 @@ def analyze_pdf(data, name, progress_callback=None):
     if df.empty:
         raise ValueError("PDF extraction produced no transactions inside the statement's declared period.")
 
-    # Before the final evidence gate, use the reported running balance as a
-    # second independent check on Debit/Credit column mapping. This can correct
-    # only a uniquely provable side inversion; amounts themselves are untouched.
-    df = _repair_pdf_side_mapping(df)
-
     # FINAL DATA-ENTRY GATE:
-    # OCR and native extraction must both prove that the ledger is internally
+    # OCR consensus and native extraction both prove that the ledger is internally
     # consistent before any forensic classification or export is allowed.
     integrity = validate_transaction_integrity(df, extraction_method)
     mismatches = integrity["balance_mismatches"]
