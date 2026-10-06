@@ -963,16 +963,35 @@ def _ocr_pdf_position_rows(data, progress_callback=None, ocr_psm=6):
                 if column:
                     buckets[column].append(word["text"])
 
-            date_text = " ".join(buckets.get("date", []))
-            date_match2 = date_re.search(date_text) or date_match
+            # OCR often corrupts the first/post date in this SBI scan
+            # while the adjacent Value Date remains readable. Read both dates
+            # from the same physical row and use the second date only as a
+            # bounded evidence-based fallback when the first is not a valid
+            # calendar date. Never invent a date.
+            row_dates = [
+                m.group(0).replace(".", "-").replace("/", "-")
+                for m in date_re.finditer(line)
+            ]
 
-            dt = pd.to_datetime(
-                date_match2.group(0)
-                .replace(".", "-")
-                .replace("/", "-"),
-                dayfirst=True,
-                errors="coerce",
-            )
+            post_text = row_dates[0] if row_dates else ""
+            value_text = row_dates[1] if len(row_dates) > 1 else ""
+
+            post_dt = pd.to_datetime(
+                post_text, dayfirst=True, errors="coerce"
+            ) if post_text else pd.NaT
+            value_dt = pd.to_datetime(
+                value_text, dayfirst=True, errors="coerce"
+            ) if value_text else pd.NaT
+
+            # If the OCR-created post date is impossible but the same-row value
+            # date is valid, use that valid printed date as the conservative
+            # transaction-date fallback. This specifically repairs cases such
+            # as 40-06-2021 -> 10-06-2021 without changing a valid date.
+            if pd.isna(post_dt) and pd.notna(value_dt):
+                dt = value_dt
+            else:
+                dt = post_dt
+
             if pd.isna(dt):
                 continue
 
@@ -1001,7 +1020,7 @@ def _ocr_pdf_position_rows(data, progress_callback=None, ocr_psm=6):
 
             all_rows.append({
                 "Date": dt,
-                "Value_Date": pd.NaT,
+                "Value_Date": value_dt,
                 "Narration": narration,
                 "Reference": reference,
                 "Debit": debit_value,
