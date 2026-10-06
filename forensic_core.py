@@ -258,10 +258,22 @@ def _normalize_reference_fields(df):
             if found:
                 ref = " ".join(dict.fromkeys(m.strip() for m in found if m.strip()))
 
-        # Never allow statement-period fragments such as "to 30-" or "to 31-"
-        # to masquerade as a transaction reference. These are narration/date
-        # spillovers from interest rows and must remain in Narration.
-        if re.fullmatch(r"(?i)(?:to|upto|up to)\s+\d{1,2}[-/.]?", ref.strip()):
+        # Never allow statement-period fragments such as "to 30-" / "to 31-"
+        # to masquerade as transaction references. PDF text extraction can split
+        # these fragments or attach them to a real identifier, so remove them
+        # anywhere in the Reference field and preserve the evidence in Narration.
+        period_fragments = re.findall(
+            r"(?i)(?:^|\s)(?:to|upto|up\s+to)\s+\d{1,2}[-/.]?(?=\s|$)",
+            ref.strip(),
+        )
+        for fragment in period_fragments:
+            cleaned_fragment = fragment.strip()
+            ref = re.sub(re.escape(cleaned_fragment), " ", ref, count=1, flags=re.I)
+            narr = f"{narr} {cleaned_fragment}".strip()
+        ref = re.sub(r"\s+", " ", ref).strip(" -:/")
+
+        # Also catch the exact standalone form after normalization.
+        if re.fullmatch(r"(?i)(?:to|upto|up\s+to)\s+\d{1,2}[-/.]?", ref.strip()):
             narr = f"{narr} {ref}".strip()
             ref = ""
 
@@ -1960,14 +1972,42 @@ def build_workbook(df, flags, meta):
     credits = pd.to_numeric(source_df["Credit"], errors="coerce")
     debits = pd.to_numeric(source_df["Debit"], errors="coerce")
 
-    # Opening balance must be known after the evidence gate. If unavailable,
-    # stop rather than producing a workbook with an arbitrary starting balance.
-    opening_balance = pd.to_numeric(pd.Series([meta.get("opening_balance")]), errors="coerce").iloc[0]
+    # Opening anchor:
+    # 1) use the verified value carried by analysis metadata;
+    # 2) if an older/stale session object has no metadata value, derive the
+    #    opening balance from the FIRST VERIFIED TRANSACTION ROW:
+    #    opening = reported first balance - first credit + first debit.
+    # This is the same mathematical anchor used by analyze_pdf. It is not a
+    # fabricated zero and it does not change any transaction amount.
+    opening_balance = pd.to_numeric(
+        pd.Series([meta.get("opening_balance")]), errors="coerce"
+    ).iloc[0]
+    opening_basis = str(meta.get("opening_balance_basis") or "").strip()
+
+    if pd.isna(opening_balance) and not source_df.empty:
+        first = source_df.iloc[0]
+        first_balance = pd.to_numeric(first.get("Balance"), errors="coerce")
+        first_debit = pd.to_numeric(first.get("Debit"), errors="coerce")
+        first_credit = pd.to_numeric(first.get("Credit"), errors="coerce")
+        if pd.notna(first_balance):
+            opening_balance = (
+                float(first_balance)
+                - (0.0 if pd.isna(first_credit) else float(first_credit))
+                + (0.0 if pd.isna(first_debit) else float(first_debit))
+            )
+            opening_basis = "Derived from first verified transaction balance"
+
     if pd.isna(opening_balance):
         raise ValueError(
-            "Workbook export stopped: a verified opening balance is not available. "
-            "The system will not fabricate a running-balance starting point."
+            "Workbook export stopped: the first verified transaction has no "
+            "usable reported Balance, so an evidence-based opening anchor cannot "
+            "be established."
         )
+
+    # Keep the metadata self-consistent for downstream summary/report generation.
+    meta = dict(meta)
+    meta["opening_balance"] = float(opening_balance)
+    meta["opening_balance_basis"] = opening_basis or "Evidence-derived opening balance"
 
     export_df = source_df.copy()
 
