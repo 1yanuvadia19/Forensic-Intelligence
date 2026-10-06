@@ -1227,26 +1227,27 @@ def _ocr_consensus_extract(data, progress_callback=None):
                 continue
             candidate = candidate[candidate["Date"].notna()].copy()
             candidate = _repair_pdf_side_mapping(candidate)
-            integrity = validate_transaction_integrity(candidate, f"OCR independent pass (psm {psm})")
-            candidates.append((candidate, integrity, psm))
+            movement_rate = float(
+                candidate[["Debit", "Credit"]].notna().any(axis=1).mean()
+            ) if len(candidate) else 0.0
+            balance_rate = float(candidate["Balance"].notna().mean()) if len(candidate) else 0.0
+            candidates.append((candidate, movement_rate, balance_rate, psm))
         except Exception:
             continue
 
     if not candidates:
         raise ValueError(
-            "Scanned PDF could not be independently verified. "
-            "Neither deterministic OCR pass produced a mathematically reconciled ledger."
+            "Scanned PDF could not be read by either independent OCR pass. "
+            "No values were invented."
         )
 
+    # OCR is only a candidate generator here. It does NOT need to reconcile
+    # before Claude sees it; otherwise Claude could never repair OCR mistakes.
     candidates.sort(
-        key=lambda item: (
-            item[1]["movement_rate"],
-            item[0]["Balance"].notna().mean(),
-            len(item[0]),
-        ),
+        key=lambda item: (item[1], item[2], len(item[0])),
         reverse=True,
     )
-    base_df, _, best_psm = candidates[0]
+    base_df, _, _, best_psm = candidates[0]
 
     claude_df = _claude_visual_verify(data, base_df, progress_callback=progress_callback)
     claude_df = _repair_pdf_side_mapping(claude_df)
