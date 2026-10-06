@@ -1898,3 +1898,288 @@ def build_pdf_report(df, flags, meta, filename):
         if value is None or pd.isna(value):
             return "-"
         return f"{float(value):,.2f}"
+
+    def fmt_date(value):
+        if value is None or pd.isna(value):
+            return "-"
+        try:
+            return pd.Timestamp(value).strftime("%d-%m-%Y")
+        except Exception:
+            return "-"
+
+    credits = pd.to_numeric(df["Credit"], errors="coerce").fillna(0)
+    debits = pd.to_numeric(df["Debit"], errors="coerce").fillna(0)
+    net = credits.sum() - debits.sum()
+
+    # Keep the report factual. Do not present a future/garbled date as the
+    # evidence period if the parser produced one; use the normalized dates.
+    valid_dates = pd.to_datetime(df["Date"], errors="coerce").dropna()
+    if len(valid_dates):
+        period_text = f"{valid_dates.min().strftime('%d-%m-%Y')} to {valid_dates.max().strftime('%d-%m-%Y')}"
+    else:
+        period_text = "-"
+
+    movement_presence = df[["Debit", "Credit"]].notna().any(axis=1).mean() if len(df) else 0
+    balance_presence = df["Balance"].notna().mean() if len(df) else 0
+    mismatch_count = balance_mismatches(df)
+
+    rails = df.groupby("Payment_Rail", dropna=False).agg(
+        Transactions=("Narration", "size"),
+        Credits=("Credit", "sum"),
+        Debits=("Debit", "sum")
+    ).reset_index().sort_values("Transactions", ascending=False)
+
+    cats = df.groupby("Category", dropna=False).agg(
+        Transactions=("Narration", "size"),
+        Credits=("Credit", "sum"),
+        Debits=("Debit", "sum")
+    ).reset_index().sort_values("Transactions", ascending=False)
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=landscape(A4),
+        rightMargin=12*mm,
+        leftMargin=12*mm,
+        topMargin=11*mm,
+        bottomMargin=11*mm,
+        title="FORENSIC INTELLIGENCE - Executive Forensic Analysis Report",
+        author="FORENSIC INTELLIGENCE",
+    )
+
+    styles = getSampleStyleSheet()
+    title = ParagraphStyle(
+        "FITitle", parent=styles["Title"], alignment=TA_CENTER,
+        fontName="Helvetica-Bold", fontSize=19, leading=22, spaceAfter=7
+    )
+    subtitle = ParagraphStyle(
+        "FISubtitle", parent=styles["Heading2"], alignment=TA_LEFT,
+        fontName="Helvetica-Bold", fontSize=12, leading=15, spaceAfter=5
+    )
+    section = ParagraphStyle(
+        "FISection", parent=styles["Heading2"], fontName="Helvetica-Bold",
+        fontSize=12, leading=15, spaceBefore=5, spaceAfter=6
+    )
+    body = ParagraphStyle(
+        "FIBody", parent=styles["BodyText"], fontName="Helvetica",
+        fontSize=8.5, leading=11, spaceAfter=3
+    )
+    cell = ParagraphStyle(
+        "FICell", parent=styles["BodyText"], fontName="Helvetica",
+        fontSize=7.2, leading=8.8, alignment=TA_LEFT
+    )
+    cell_bold = ParagraphStyle(
+        "FICellBold", parent=cell, fontName="Helvetica-Bold"
+    )
+
+    story = [
+        Paragraph("FORENSIC INTELLIGENCE", title),
+        Paragraph("Executive Forensic Analysis Report", subtitle),
+        Paragraph(f"<b>Evidence:</b> {filename}", body),
+        Paragraph(
+            f"<b>Source:</b> {meta.get('source_type','-')} &nbsp;&nbsp; "
+            f"<b>Pages:</b> {meta.get('location','-')} &nbsp;&nbsp; "
+            f"<b>Evidence Period:</b> {period_text}",
+            body
+        ),
+        Spacer(1, 4),
+    ]
+
+    # Executive summary.
+    summary_data = [
+        ["Metric", "Result"],
+        ["Transactions", f"{len(df):,}"],
+        ["Total Credits", fmt_amount(credits.sum())],
+        ["Total Debits", fmt_amount(debits.sum())],
+        ["Net Flow", fmt_amount(net)],
+        ["Review Priorities", f"{int((df.Priority == 'REVIEW').sum()):,}"],
+        ["Critical Priorities", f"{int((df.Priority == 'CRITICAL').sum()):,}"],
+        ["Debit/Credit Recovery", f"{movement_presence:.1%} of rows"],
+        ["Balance Recovery", f"{balance_presence:.1%} of rows"],
+        ["Balance Reconciliation", f"{mismatch_count:,} mismatch(es)"],
+    ]
+
+    summary_table = Table(summary_data, colWidths=[55*mm, 48*mm], repeatRows=1)
+    summary_table.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#17324d")),
+        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTNAME", (0,1), (-1,-1), "Helvetica"),
+        ("FONTSIZE", (0,0), (-1,-1), 8),
+        ("GRID", (0,0), (-1,-1), 0.4, colors.HexColor("#9a9a9a")),
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+        ("LEFTPADDING", (0,0), (-1,-1), 5),
+        ("RIGHTPADDING", (0,0), (-1,-1), 5),
+        ("TOPPADDING", (0,0), (-1,-1), 4),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+    ]))
+
+    story += [
+        summary_table,
+        Spacer(1, 7),
+        Paragraph("Extraction & Evidence Quality", section),
+    ]
+
+    quality_status = "PASS" if movement_presence >= 0.60 and mismatch_count == 0 else "REVIEW REQUIRED"
+    quality_text = (
+        f"<b>Status:</b> {quality_status}<br/>"
+        f"Debit/Credit amounts recovered on {movement_presence:.1%} of transaction rows. "
+        f"Balance values recovered on {balance_presence:.1%} of rows. "
+        f"Sequential balance reconciliation reports {mismatch_count:,} mismatch(es)."
+    )
+    if movement_presence < 0.60:
+        quality_text += (
+            "<br/><b>Important:</b> Debit/Credit extraction confidence is below the "
+            "required threshold. The source statement must be re-checked before relying "
+            "on monetary conclusions."
+        )
+    if mismatch_count:
+        quality_text += (
+            "<br/><b>Important:</b> Balance mismatches are an evidence-integrity review "
+            "item and must not be treated as proof of irregularity."
+        )
+
+    story += [Paragraph(quality_text, body), PageBreak()]
+
+    # Key findings table with clean numeric formatting.
+    story += [Paragraph("Key Review Findings", section)]
+    findings = [[
+        Paragraph("Finding", cell_bold),
+        Paragraph("Value", cell_bold),
+        Paragraph("Basis", cell_bold),
+        Paragraph("Interpretation", cell_bold),
+        Paragraph("Status", cell_bold),
+    ]]
+    for _, r in master.iterrows():
+        value = r["Value"]
+        finding = str(r["Finding"])
+        if isinstance(value, (int, float, np.integer, np.floating)) and not pd.isna(value):
+            if any(k in finding.lower() for k in ["credit", "debit", "flow", "amount"]):
+                value_text = fmt_amount(value)
+            else:
+                value_text = f"{int(value):,}" if float(value).is_integer() else f"{float(value):,.2f}"
+        else:
+            value_text = str(value)
+        findings.append([
+            Paragraph(finding, cell),
+            Paragraph(value_text, cell),
+            Paragraph(str(r["Basis"]), cell),
+            Paragraph(str(r["Interpretation"]), cell),
+            Paragraph(str(r["Review_Status"]), cell),
+        ])
+
+    findings_table = Table(
+        findings,
+        repeatRows=1,
+        colWidths=[47*mm, 34*mm, 58*mm, 78*mm, 28*mm]
+    )
+    findings_table.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#17324d")),
+        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+        ("GRID", (0,0), (-1,-1), 0.3, colors.HexColor("#9a9a9a")),
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("LEFTPADDING", (0,0), (-1,-1), 4),
+        ("RIGHTPADDING", (0,0), (-1,-1), 4),
+        ("TOPPADDING", (0,0), (-1,-1), 3),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+    ]))
+    story += [findings_table, PageBreak()]
+
+    def profile_table(title_text, table_df):
+        story_local = [Paragraph(title_text, section)]
+        data = [[
+            Paragraph(str(c), cell_bold) for c in table_df.columns
+        ]]
+        for _, r in table_df.head(20).iterrows():
+            row = []
+            for c in table_df.columns:
+                value = r[c]
+                if c in {"Credits", "Debits"}:
+                    txt = fmt_amount(value)
+                elif c == "Transactions":
+                    txt = f"{int(value):,}" if pd.notna(value) else "-"
+                else:
+                    txt = "-" if pd.isna(value) else str(value)
+                row.append(Paragraph(txt, cell))
+            data.append(row)
+
+        widths = [63*mm, 31*mm, 42*mm, 42*mm]
+        tb = Table(data, repeatRows=1, colWidths=widths)
+        tb.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#17324d")),
+            ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+            ("GRID", (0,0), (-1,-1), 0.3, colors.HexColor("#9a9a9a")),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+            ("LEFTPADDING", (0,0), (-1,-1), 4),
+            ("RIGHTPADDING", (0,0), (-1,-1), 4),
+            ("TOPPADDING", (0,0), (-1,-1), 3),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+        ]))
+        story_local.append(tb)
+        return story_local
+
+    story += profile_table("Payment Rail Profile", rails)
+    story += [Spacer(1, 8)]
+    story += profile_table("Category Profile", cats)
+    story += [PageBreak(), Paragraph("Fund-Flow Review", section)]
+
+    if fund_flow.empty:
+        story.append(Paragraph(
+            "No configured large-credit / onward-debit pattern identified under the current review rule.",
+            body
+        ))
+    else:
+        ff = fund_flow.head(40).copy()
+        cols = [
+            "Credit_Date", "Credit_Amount", "Credit_Narration",
+            "Debit_Date", "Debit_Amount", "Debit_Narration",
+            "Movement_Ratio", "Review_Reason"
+        ]
+        ff = ff[[c for c in cols if c in ff.columns]]
+        data = [[Paragraph(str(c), cell_bold) for c in ff.columns]]
+        for _, r in ff.iterrows():
+            row = []
+            for c in ff.columns:
+                v = r[c]
+                if c.endswith("_Date"):
+                    txt = fmt_date(v)
+                elif "Amount" in c:
+                    txt = fmt_amount(v)
+                elif c == "Movement_Ratio":
+                    txt = f"{float(v):.2%}" if pd.notna(v) else "-"
+                else:
+                    txt = "-" if pd.isna(v) or str(v).strip() == "" else str(v)
+                row.append(Paragraph(txt, cell))
+            data.append(row)
+
+        ff_widths = [23*mm, 28*mm, 58*mm, 23*mm, 28*mm, 58*mm, 25*mm, 48*mm]
+        tb = Table(data, repeatRows=1, colWidths=ff_widths)
+        tb.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#17324d")),
+            ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+            ("GRID", (0,0), (-1,-1), 0.25, colors.HexColor("#9a9a9a")),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+            ("FONTSIZE", (0,0), (-1,-1), 6.5),
+        ]))
+        story.append(tb)
+
+    story += [
+        Spacer(1, 9),
+        Paragraph("Conclusion & Use of Report", section),
+        Paragraph(
+            "This report presents extracted facts, analytical observations and review priorities. "
+            "A REVIEW or CRITICAL status is not a finding of fraud, illegality, intent or guilt. "
+            "All material observations should be verified against the original bank statement and "
+            "supporting evidence before being used in an investigation, audit or legal proceeding.",
+            body
+        ),
+        Paragraph(
+            f"<b>Generated by:</b> FORENSIC INTELLIGENCE &nbsp;&nbsp; "
+            f"<b>Extraction method:</b> {meta.get('layout_confidence','-')}",
+            body
+        ),
+    ]
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.getvalue()
