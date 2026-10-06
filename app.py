@@ -8,6 +8,10 @@ import streamlit as st
 
 from forensic_core import analyze_upload, build_workbook, build_master_analysis, build_pdf_report, balance_mismatches
 
+# Bump this whenever extraction/export logic changes. It prevents Streamlit from
+# reusing a stale in-memory result after a forensic-engine update.
+ANALYSIS_ENGINE_VERSION = "2026-10-06-master-blaster-v3"
+
 
 # ============================================================
 # PAGE CONFIG
@@ -180,8 +184,15 @@ st.caption(
 # the entire PDF pipeline on every Streamlit rerun.
 cached_result = st.session_state.get("analysis_result")
 cached_hash = st.session_state.get("analysis_hash")
+cached_engine_version = st.session_state.get("analysis_engine_version")
 
-if cached_result is not None and cached_hash == file_hash:
+analysis_cache_key = f"{file_hash}:{ANALYSIS_ENGINE_VERSION}"
+
+if (
+    cached_result is not None
+    and cached_hash == analysis_cache_key
+    and cached_engine_version == ANALYSIS_ENGINE_VERSION
+):
     result = cached_result
     st.success("✓ Existing analysis reused — no re-processing required.")
 else:
@@ -204,10 +215,12 @@ else:
         status.success("Forensic analysis completed successfully.")
 
         st.session_state.analysis_result = result
-        st.session_state.analysis_hash = file_hash
+        st.session_state.analysis_hash = analysis_cache_key
+        st.session_state.analysis_engine_version = ANALYSIS_ENGINE_VERSION
         st.session_state.derived_hash = None
         st.session_state.derived_analysis = None
         st.session_state.export_hash = None
+        st.session_state.export_engine_version = ANALYSIS_ENGINE_VERSION
         st.session_state.export_workbook = None
         st.session_state.export_pdf = None
 
