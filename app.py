@@ -10,7 +10,7 @@ from forensic_core import analyze_upload, build_workbook, build_master_analysis,
 
 # Bump this whenever extraction/export logic changes. It prevents Streamlit from
 # reusing a stale in-memory result after a forensic-engine update.
-ANALYSIS_ENGINE_VERSION = "2026-10-06-master-blaster-v4"
+ANALYSIS_ENGINE_VERSION = "2026-10-06-master-blaster-v5"
 
 
 # ============================================================
@@ -629,6 +629,7 @@ if tabs[6].open:
                         st.session_state.export_workbook = build_workbook(df, flags, meta)
                         st.session_state.export_pdf = build_pdf_report(df, flags, meta, file_name)
                         st.session_state.export_hash = file_hash
+                        st.session_state.export_engine_version = ANALYSIS_ENGINE_VERSION
                     st.success("Exports prepared. You can now download them below.")
                     st.rerun()
                 except Exception as exc:
