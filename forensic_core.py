@@ -1452,6 +1452,8 @@ def analyze_pdf(data, name, progress_callback=None):
     pages = len(doc)
     texts = [p.get_text("text") for p in doc]
     source_opening_balance = _extract_opening_balance_from_text("\n".join(texts))
+    if pd.isna(source_opening_balance) and ratio < 0.5:
+        source_opening_balance = _extract_opening_balance_from_ocr(data)
     nonempty = sum(bool(t.strip()) for t in texts)
     ratio = nonempty / pages if pages else 0
 
@@ -1644,6 +1646,27 @@ def analyze_upload(data, name, progress_callback=None):
 
 
 
+
+
+
+def _extract_opening_balance_from_ocr(data):
+    """Conservative OCR fallback for an explicitly labelled opening balance."""
+    try:
+        import fitz
+        import pytesseract
+        from PIL import Image, ImageOps
+        doc = fitz.open(stream=data, filetype="pdf")
+        for page in list(doc)[:2]:
+            pix = page.get_pixmap(matrix=fitz.Matrix(1.6, 1.6), alpha=False)
+            image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            gray = ImageOps.grayscale(image)
+            text = pytesseract.image_to_string(gray, config="--psm 6")
+            value = _extract_opening_balance_from_text(text)
+            if pd.notna(value):
+                return value
+    except Exception:
+        return np.nan
+    return np.nan
 
 
 def _extract_opening_balance_from_text(text):
