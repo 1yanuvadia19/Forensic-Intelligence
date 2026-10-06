@@ -8,7 +8,14 @@ import numpy as np
 import pandas as pd
 
 
-CANON = ["Date", "Value_Date", "Narration", "Reference", "Debit", "Credit", "Balance"]
+CANON = ["Date", "Narration", "Reference", "Debit", "Credit", "Balance"]
+
+# FORENSIC TRANSACTION SCHEMA
+# Exactly one transaction-date field is exported. If a source prints both
+# Post/Transaction Date and Value Date, the primary transaction/post date is
+# used. Value Date may be consulted only as an evidence-backed fallback when
+# the primary date is unreadable; it is never exported as a second date column.
+
 
 
 def money(x):
@@ -68,20 +75,18 @@ def standardize(raw):
     df = df.dropna(how="all")
     cols = df.columns
 
-    date = pick(cols, ["post date", "transaction date", "txn date", "date"])
-    value = pick(cols, ["value date"])
-    narr = pick(cols, ["description", "narration", "particular", "remarks", "details"])
-    ref = pick(cols, ["cheque no", "reference", "ref no", "utr", "transaction id", "txn id"])
-    debit = pick(cols, ["debit rs", "debit", "withdrawal", "withdraw"])
-    credit = pick(cols, ["credit rs", "credit", "deposit"])
-    bal = pick(cols, ["balance rs", "balance", "closing balance"])
+    date = pick(cols, ["post date", "transaction date", "txn date", "transaction dt", "date"])
+    narr = pick(cols, ["transaction particulars", "transaction description", "description", "narration", "particulars", "particular", "remarks", "details"])
+    ref = pick(cols, ["chq/ref no", "cheque/ref no", "cheque no", "chq no", "instrument no", "reference no", "reference", "ref no", "utr no", "utr", "transaction id", "txn id", "rrn"])
+    debit = pick(cols, ["withdrawal amt", "withdrawal amount", "debit amt", "debit rs", "debit", "withdrawal", "withdraw"])
+    credit = pick(cols, ["deposit amt", "deposit amount", "credit amt", "credit rs", "credit", "deposit"])
+    bal = pick(cols, ["closing balance", "closing bal", "balance rs", "balance"])
 
     if not narr:
         raise ValueError("Narration/Description column not found.")
 
     out = pd.DataFrame()
     out["Date"] = pd.to_datetime(df[date], errors="coerce", dayfirst=True) if date else pd.NaT
-    out["Value_Date"] = pd.to_datetime(df[value], errors="coerce", dayfirst=True) if value else pd.NaT
     out["Narration"] = df[narr].fillna("").astype(str).str.strip()
     out["Reference"] = df[ref].fillna("").astype(str).str.strip() if ref else pd.Series("", index=df.index)
     out["Debit"] = df[debit].map(money).abs() if debit else np.nan
@@ -95,6 +100,18 @@ def standardize(raw):
     if len(out) == 0:
         raise ValueError("Header found, but no transaction rows with dates/amounts were detected.")
     return out[CANON], hi, score
+
+
+def _enforce_single_date_schema(df):
+    """Normalize every extractor to the one-date forensic transaction schema."""
+    x = df.copy()
+    if "Value_Date" in x.columns:
+        x = x.drop(columns=["Value_Date"])
+    required = ["Date", "Narration", "Reference", "Debit", "Credit", "Balance"]
+    missing = [c for c in required if c not in x.columns]
+    if missing:
+        raise ValueError(f"Transaction schema incomplete; missing field(s): {', '.join(missing)}")
+    return x[required + [c for c in x.columns if c not in required]]
 
 
 def rail(t):
@@ -272,7 +289,7 @@ def analyze_excel(data, name):
             continue
     if not frames:
         raise ValueError("No sheet contained a confident transaction table.")
-    df = enrich(pd.concat(frames, ignore_index=True))
+    df = _enforce_single_date_schema(enrich(pd.concat(frames, ignore_index=True)))
     flags = df[df.Priority.isin(["REVIEW", "CRITICAL"])].copy()
     meta = {
         "source_type": "Excel/CSV",
@@ -400,7 +417,6 @@ def _native_pdf_text_rows(data, progress_callback=None):
 
             records.append({
                 "Date": pd.to_datetime(date_text, dayfirst=True, errors="coerce"),
-                "Value_Date": pd.NaT,
                 "Narration": tail,
                 "Reference": "",
                 "Debit": np.nan,
@@ -462,14 +478,14 @@ def _native_pdf_position_rows(data, progress_callback=None):
             "date": phrase_x(["post date", "transaction date", "txn date"])
                     or token_x(["date"]),
             "value": phrase_x(["value date"]) or token_x(["value"]),
-            "narr": token_x(["description", "narration", "particular", "details", "remarks"]),
+            "narr": token_x(["description", "narration", "particular", "details", "remarks", "transaction"]),
             # Bank statements commonly label this column as CHQ.NO. / CHQ NO.
             # It must be recognized explicitly; otherwise the cheque number can sit
             # just inside the Debit boundary and be falsely extracted as a monetary
             # withdrawal (the exact failure seen in the Bank of Baroda benchmark).
             "ref": phrase_x([
-                "reference", "ref no", "cheque no", "chq no", "chq.no",
-                "transaction id", "txn id", "utr"
+                "reference", "ref no", "chq/ref no", "cheque/ref no", "cheque no", "chq no", "chq.no",
+                "instrument no", "transaction id", "txn id", "utr no", "utr", "rrn"
             ]) or token_x(["reference", "ref", "cheque", "chq", "utr"]),
             "debit": token_x(["debit", "withdrawal", "withdraw"]),
             "credit": token_x(["credit", "deposit"]),
@@ -640,16 +656,6 @@ def _native_pdf_position_rows(data, progress_callback=None):
             narr_value = " ".join(buckets.get("narr", [])).strip()
             ref_value = " ".join(buckets.get("ref", [])).strip()
 
-            value_date = pd.NaT
-            value_text = " ".join(buckets.get("value", []))
-            vm = date_re.search(value_text)
-            if vm:
-                value_date = pd.to_datetime(
-                    vm.group(0).replace(".", "-").replace("/", "-"),
-                    dayfirst=True,
-                    errors="coerce",
-                )
-
             if not narr_value:
                 narr_value = line_text
 
@@ -684,7 +690,6 @@ def _native_pdf_position_rows(data, progress_callback=None):
                 pd.DataFrame(
                     [{
                         "Date": date_value,
-                        "Value_Date": value_date,
                         "Narration": narr_value,
                         "Reference": ref_value,
                         "Debit": debit_value,
@@ -800,7 +805,7 @@ def _ocr_pdf_position_rows(data, progress_callback=None, ocr_psm=6):
                 "description", "narration", "particular",
                 "details", "remarks"
             ]),
-            "ref": token(["reference", "ref", "cheque", "utr"]),
+            "ref": token(["reference", "ref", "cheque", "chq", "instrument", "utr", "rrn"]),
             "debit": token(["debit", "withdrawal", "withdraw"]),
             "credit": token(["credit", "deposit"]),
             "balance": token(["balance"]),
@@ -1045,7 +1050,6 @@ def _ocr_pdf_position_rows(data, progress_callback=None, ocr_psm=6):
 
             all_rows.append({
                 "Date": dt,
-                "Value_Date": value_dt,
                 "Narration": narration,
                 "Reference": reference,
                 "Debit": debit_value,
@@ -1565,7 +1569,7 @@ def analyze_pdf(data, name, progress_callback=None):
     if progress_callback:
         progress_callback(pages, max(pages, 1), "Running forensic classification and validation")
 
-    df = enrich(df)
+    df = _enforce_single_date_schema(enrich(df))
     flags = df[df.Priority.isin(["REVIEW", "CRITICAL"])].copy()
 
     meta = {
