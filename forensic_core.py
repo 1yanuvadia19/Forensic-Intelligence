@@ -1216,7 +1216,13 @@ OCR CANDIDATES:
 
 
 def _ocr_consensus_extract(data, progress_callback=None):
-    """Two OCR readings -> Claude visual verification -> mathematical proof."""
+    """Two independent OCR readings -> consensus -> deterministic mathematical proof.
+
+    An external AI verifier is optional. The core forensic pipeline NEVER requires
+    a paid AI/API subscription. If ANTHROPIC_API_KEY is configured, Claude may be
+    used as an additional visual verification pass; otherwise the deterministic
+    OCR consensus engine is used directly.
+    """
     candidates = []
     for psm in (6, 4):
         try:
@@ -1241,21 +1247,47 @@ def _ocr_consensus_extract(data, progress_callback=None):
             "No values were invented."
         )
 
-    # OCR is only a candidate generator here. It does NOT need to reconcile
-    # before Claude sees it; otherwise Claude could never repair OCR mistakes.
+    # Prefer the candidate with the strongest transaction/amount/balance coverage.
+    # Neither OCR pass is trusted as final evidence until the deterministic
+    # integrity gate proves the extracted rows mathematically.
     candidates.sort(
         key=lambda item: (item[1], item[2], len(item[0])),
         reverse=True,
     )
     base_df, _, _, best_psm = candidates[0]
 
-    claude_df = _claude_visual_verify(data, base_df, progress_callback=progress_callback)
-    claude_df = _repair_pdf_side_mapping(claude_df)
+    # Optional visual AI verification. This is an enhancement, NOT a dependency.
+    # The app remains fully functional without a Claude subscription or API key.
+    if os.getenv("ANTHROPIC_API_KEY"):
+        try:
+            verified = _claude_visual_verify(
+                data, base_df, progress_callback=progress_callback
+            )
+            verified = _repair_pdf_side_mapping(verified)
+            integrity = validate_transaction_integrity(
+                verified,
+                f"Optional visual AI verification + OCR candidate (psm {best_psm})",
+            )
+            return (
+                verified,
+                integrity,
+                f"Optional visual AI verification + independent OCR consensus (psm {best_psm})",
+            )
+        except Exception as exc:
+            # Never silently substitute a failed AI result. Fall back to the
+            # deterministic candidate and let the same hard integrity gate decide.
+            if progress_callback:
+                progress_callback(
+                    0, 1,
+                    f"Visual AI verification unavailable; using deterministic OCR consensus ({exc})"
+                )
+
     integrity = validate_transaction_integrity(
-        claude_df,
-        f"Claude visual verification + OCR candidate (psm {best_psm})",
+        base_df,
+        f"Deterministic OCR consensus (psm {best_psm})",
     )
-    return claude_df, integrity, f"Claude visual verification + independent OCR consensus (psm {best_psm})"
+    return base_df, integrity, f"Deterministic OCR consensus (psm {best_psm})"
+
 
 
 def _repair_pdf_side_mapping(df, tolerance=0.01):
