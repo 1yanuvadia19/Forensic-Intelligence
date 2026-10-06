@@ -160,38 +160,67 @@ def rail(t):
     return "OTHER / UNIDENTIFIED"
 
 
+def _name_after_marker(raw, markers):
+    """Extract the readable party/account portion after an explicit marker."""
+    text = re.sub(r"\s+", " ", str(raw or "")).strip()
+    upper = text.upper()
+    for marker in markers:
+        m = re.search(marker, upper)
+        if m:
+            tail = text[m.end():].strip(" /:-")
+            tail = re.sub(r"(?i)\b(?:FROM|TO|BY|FOR|PAYMENT|PH|UPI|NEFT|IMPS|RTGS|NACH|ECS|ACH)\b", " ", tail)
+            tail = re.sub(r"\b\d{6,}\b", " ", tail)
+            tail = re.sub(r"[/|:_\-]+", " ", tail)
+            tail = re.sub(r"\s+", " ", tail).strip(" -")
+            if tail:
+                return tail[:120]
+    return ""
+
+
 def semantic_narration(t, d=np.nan, c=np.nan):
-    """Add a deterministic banking description while preserving the raw narration."""
+    """Rename particulars using explicit bank-statement evidence and the user-defined forensic rules."""
     raw = re.sub(r"\s+", " ", str(t or "")).strip()
-    u = raw.upper()
     if not raw:
         return "-"
-    rules = [
-        ("Interest Credit", r"\b(?:INTEREST|INT\.?\s*PD|INT\.?\s*CREDIT|INT\.PD)\b"),
-        ("Bank Charge", r"\b(?:AMB|NON\s*MAINTENANCE|BANK\s*CHARGE|SERVICE\s*CHARGE|SMS\s*ALERT|CHRG|CHARGES|GST\s*ON\s*CHARGES)\b"),
-        ("NACH / ACH Debit", r"\b(?:NACH|ACH|ECS)\b"),
-        ("UPI Payment", r"\bUPI\b"),
-        ("IMPS Transfer", r"\bIMPS\b"),
-        ("NEFT Transfer", r"\bNEFT\b"),
-        ("RTGS Transfer", r"\bRTGS\b"),
-        ("ATM / Cash Withdrawal", r"\b(?:ATM|CASH\s*WITHDRAWAL|WDL\s*TFR)\b"),
-        ("Cash Deposit", r"\b(?:CASH\s*DEPOSIT|BY\s*CASH)\b"),
-        ("Cheque Transaction", r"\b(?:CHQ|CHEQUE|CTS|MICR\s*CLG)\b"),
-        ("Salary Credit", r"\b(?:SALARY|BY\s*SALARY)\b"),
-        ("Insurance / Premium", r"\b(?:INSURANCE|PREMIUM|LIC)\b"),
-        ("Loan / Finance Debit", r"\b(?:BAJAJ|FINANCE|LOAN|EMI|NACHDD|HOUSINGFINA|PIRAMAL)\b"),
-        ("Investment / Broking", r"\b(?:BROKING|BROKER|SECURITIES|ZERODHA|ANGEL\s*ONE|ANGELONE)\b"),
-        ("Card / POS Payment", r"\b(?:POS|CARD|DEBIT\s*CARD|CREDIT\s*CARD)\b"),
-        ("Online / Merchant Payment", r"\b(?:AMAZON|FLIPKART|SHOPSY|PAYMENT\s*GATEWAY|RAZORPAY|BILLDESK)\b"),
-        ("Transfer", r"\b(?:TRANSFER|TRF|TFR)\b"),
-    ]
-    for label, pattern in rules:
-        if re.search(pattern, u):
-            return f"[{label}] {raw}"
-    if pd.notna(c) and float(c or 0) > 0 and (pd.isna(d) or float(d or 0) == 0):
-        return f"[Credit / Receipt] {raw}"
-    if pd.notna(d) and float(d or 0) > 0 and (pd.isna(c) or float(c or 0) == 0):
-        return f"[Debit / Expense] {raw}"
+    u = raw.upper()
+    debit = pd.notna(d) and float(d) > 0
+    credit = pd.notna(c) and float(c) > 0
+
+    # Bank-generated entries.
+    if re.search(r"\b(?:INTEREST|INT\.?\s*PD|INT\.?\s*CR|INTEREST\s*CREDIT|INT\.PD)\b", u):
+        return "Interest"
+    if re.search(r"\b(?:AMB|NON\s*MAINTENANCE|BANK\s*CHARGE|SERVICE\s*CHARGE|SMS\s*ALERT|CHRG|CHARGES|GST\s*ON\s*CHARGES|FEE|COMMISSION)\b", u):
+        return "Bank Charge"
+
+    # Cash and cheque movements.
+    if re.search(r"\bATM\b|ATM[-_/ ]?CASH", u) and debit:
+        return "Cash Withdrawal – ATM"
+    if re.search(r"\b(?:CASH\s*WITHDRAWAL|CASH\s*WDL|CASH\s*WTHDRWL|WDL\s*TFR)\b", u) and debit:
+        return "Cash Withdrawal"
+    if re.search(r"\b(?:CHQ|CHEQUE|CTS|MICR\s*CLG)\b", u):
+        return "Cheque Withdrawal" if debit else ("Cheque Deposit" if credit else "Cheque Transaction")
+    if re.search(r"\b(?:CASH\s*DEPOSIT|CASH\s*DEP|CDM\s*CR|BY\s*CASH)\b", u) and credit:
+        return "Cash Deposit"
+
+    # Explicit transfer direction requested by the forensic prompt.
+    if re.search(r"\b(?:DEP\s*T(?:R|F)|DEPOSIT\s*T(?:R|F)|DEPOSIT\s*TRANSFER|TFR\s*IN|TRANSFER\s*IN)\b", u):
+        party = _name_after_marker(raw, [r"DEP\s*T(?:R|F)", r"DEPOSIT\s*TRANSFER", r"TFR\s*IN", r"TRANSFER\s*IN"])
+        return f"[TRANSFER IN] - {party}" if party else "[TRANSFER IN] - [Not stated]"
+    if re.search(r"\b(?:WDL\s*T(?:R|F|D)|WITHDRAWAL\s*TRANSFER|TFR\s*OUT|TRANSFER\s*OUT)\b", u):
+        party = _name_after_marker(raw, [r"WDL\s*T(?:R|F|D)", r"WITHDRAWAL\s*TRANSFER", r"TFR\s*OUT", r"TRANSFER\s*OUT"])
+        return f"[TRANSFER OUT] - {party}" if party else "[TRANSFER OUT] - [Not stated]"
+
+    # Card/POS: retain the merchant/person name when explicitly present.
+    if re.search(r"\b(?:POS|PUR|ECOM\s*PUR|DEBIT\s*CARD|CREDIT\s*CARD|CARD\s*PAYMENT)\b", u):
+        party = counterparty(raw)
+        return f"POS transaction - {party}" if party else "POS transaction"
+
+    # UPI / GPay / Paytm / PhonePe are deliberately labelled Net Banking per the requested output convention.
+    if re.search(r"\bUPI\b|G[- ]?PAY|GOOGLEPAY|PAYTM|PHONE[- ]?PE|PHONEPE", u):
+        party = counterparty(raw)
+        return f"Net Banking - {party}" if party else "Net Banking"
+
+    # Other explicit rails: keep the original particulars rather than inventing a name.
     return raw
 
 def category(t, d, c):
@@ -341,10 +370,11 @@ def _normalize_reference_fields(df):
 def enrich(df):
     x = df.copy()
     x = _normalize_reference_fields(x)
-    x["Narration"] = [semantic_narration(t, d, c) for t, d, c in zip(x["Narration"], x["Debit"], x["Credit"])]
-    x["Payment_Rail"] = [rail(v) for v in x["Narration"]]
-    x["Counterparty"] = x["Narration"].map(counterparty)
-    x["Category"] = [category(t, d, c) for t, d, c in zip(x.Narration, x.Debit, x.Credit)]
+    raw_narration = x["Narration"].copy()
+    x["Payment_Rail"] = [rail(v) for v in raw_narration]
+    x["Counterparty"] = raw_narration.map(counterparty)
+    x["Category"] = [category(t, d, c) for t, d, c in zip(raw_narration, x.Debit, x.Credit)]
+    x["Narration"] = [semantic_narration(t, d, c) for t, d, c in zip(raw_narration, x["Debit"], x["Credit"])]
     x["Abs_Amount"] = x[["Debit", "Credit"]].fillna(0).sum(axis=1)
 
     positive = x.loc[x.Abs_Amount > 0, "Abs_Amount"]
