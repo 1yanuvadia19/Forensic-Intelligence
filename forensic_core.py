@@ -1972,43 +1972,10 @@ def build_workbook(df, flags, meta):
     credits = pd.to_numeric(source_df["Credit"], errors="coerce")
     debits = pd.to_numeric(source_df["Debit"], errors="coerce")
 
-    # Opening anchor:
-    # 1) use the verified value carried by analysis metadata;
-    # 2) if an older/stale session object has no metadata value, derive the
-    #    opening balance from the FIRST VERIFIED TRANSACTION ROW:
-    #    opening = reported first balance - first credit + first debit.
-    # This is the same mathematical anchor used by analyze_pdf. It is not a
-    # fabricated zero and it does not change any transaction amount.
-    opening_balance = pd.to_numeric(
-        pd.Series([meta.get("opening_balance")]), errors="coerce"
-    ).iloc[0]
-    opening_basis = str(meta.get("opening_balance_basis") or "").strip()
-
-    if pd.isna(opening_balance) and not source_df.empty:
-        first = source_df.iloc[0]
-        first_balance = pd.to_numeric(first.get("Balance"), errors="coerce")
-        first_debit = pd.to_numeric(first.get("Debit"), errors="coerce")
-        first_credit = pd.to_numeric(first.get("Credit"), errors="coerce")
-        if pd.notna(first_balance):
-            opening_balance = (
-                float(first_balance)
-                - (0.0 if pd.isna(first_credit) else float(first_credit))
-                + (0.0 if pd.isna(first_debit) else float(first_debit))
-            )
-            opening_basis = "Derived from first verified transaction balance"
-
-    if pd.isna(opening_balance):
-        raise ValueError(
-            "Workbook export stopped: the first verified transaction has no "
-            "usable reported Balance, so an evidence-based opening anchor cannot "
-            "be established."
-        )
-
-    # Keep the metadata self-consistent for downstream summary/report generation.
-    meta = dict(meta)
-    meta["opening_balance"] = float(opening_balance)
-    meta["opening_balance_basis"] = opening_basis or "Evidence-derived opening balance"
-
+    # Export does not require a separate opening-balance feature.
+    # The first verified transaction keeps its source Balance; subsequent rows
+    # calculate previous balance + Credit - Debit.
+    
     export_df = source_df.copy()
 
     # User-facing transaction schema: exactly one Date column.
@@ -2026,27 +1993,16 @@ def build_workbook(df, flags, meta):
     for col in ["Debit", "Credit"]:
         export_df[col] = pd.to_numeric(export_df[col], errors="coerce")
 
-    # Build the visible opening-anchor row first.
-    opening_row = {
-        "Date": "-",
-        "Narration": "OPENING BALANCE",
-        "Reference": "-",
-        "Debit": "-",
-        "Credit": "-",
-        "Balance": float(opening_balance),
-    }
+    # Keep the first verified source balance as the first ledger balance.
+    # No OPENING BALANCE row is created and no zero/arbitrary anchor is invented.
+    display_df = export_df.copy()
 
-    rows = [opening_row]
-    rows.extend(export_df.to_dict("records"))
-    display_df = pd.DataFrame(rows, columns=required)
-
-    # Replace missing movement values with the requested "-" placeholder.
+    # Missing Debit/Credit values are displayed as "-".
     for col in ["Debit", "Credit"]:
         display_df[col] = display_df[col].where(display_df[col].notna(), "-")
 
-    # Formula-driven Balance: F2 is the verified opening anchor; every
-    # transaction row independently recomputes prior balance + credit - debit.
-    # ISNUMBER protects the formula from the "-" placeholders.
+    # From the second transaction onward:
+    # previous balance + Credit - Debit.
     for excel_row in range(3, len(display_df) + 2):
         display_df.at[excel_row - 2, "Balance"] = (
             f'=F{excel_row-1}+IF(ISNUMBER(E{excel_row}),E{excel_row},0)'
@@ -2056,7 +2012,7 @@ def build_workbook(df, flags, meta):
     master, fund_flow, concentration, dq, _ = build_master_analysis(source_df)
     summary = pd.DataFrame({
         "Metric": [
-            "Source", "Period", "Transactions", "Opening Balance",
+            "Source", "Period", "Transactions",
             "Total Credits", "Total Debits", "Net Flow",
             "Review", "Critical", "Balance Mismatches"
         ],
@@ -2064,7 +2020,6 @@ def build_workbook(df, flags, meta):
             meta.get("source_type", "-"),
             meta.get("location", "-"),
             len(source_df),
-            float(opening_balance),
             credits.fillna(0).sum(),
             debits.fillna(0).sum(),
             credits.fillna(0).sum() - debits.fillna(0).sum(),
