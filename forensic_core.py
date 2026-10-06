@@ -258,6 +258,13 @@ def _normalize_reference_fields(df):
             if found:
                 ref = " ".join(dict.fromkeys(m.strip() for m in found if m.strip()))
 
+        # Never allow statement-period fragments such as "to 30-" or "to 31-"
+        # to masquerade as a transaction reference. These are narration/date
+        # spillovers from interest rows and must remain in Narration.
+        if re.fullmatch(r"(?i)(?:to|upto|up to)\s+\d{1,2}[-/.]?", ref.strip()):
+            narr = f"{narr} {ref}".strip()
+            ref = ""
+
         x.at[i, "Narration"] = narr
         x.at[i, "Reference"] = ref
 
