@@ -1216,12 +1216,11 @@ OCR CANDIDATES:
 
 
 def _ocr_consensus_extract(data, progress_callback=None):
-    """Two independent OCR readings -> consensus -> deterministic mathematical proof.
+    """Independent OCR passes -> row-level consensus -> deterministic proof.
 
-    An external AI verifier is optional. The core forensic pipeline NEVER requires
-    a paid AI/API subscription. If ANTHROPIC_API_KEY is configured, Claude may be
-    used as an additional visual verification pass; otherwise the deterministic
-    OCR consensus engine is used directly.
+    No external AI is required. A row is accepted only when the extraction can
+    be independently supported by the OCR/layout evidence and the final ledger
+    passes the mathematical integrity gate.
     """
     candidates = []
     for psm in (6, 4):
@@ -1231,13 +1230,23 @@ def _ocr_consensus_extract(data, progress_callback=None):
             )
             if candidate is None or candidate.empty:
                 continue
-            candidate = candidate[candidate["Date"].notna()].copy()
+            candidate = candidate[candidate["Date"].notna()].copy().reset_index(drop=True)
             candidate = _repair_pdf_side_mapping(candidate)
+
+            check = balance_check(candidate)
+            mismatches = int((check["Status"] == "MISMATCH").sum()) if not check.empty else 0
             movement_rate = float(
                 candidate[["Debit", "Credit"]].notna().any(axis=1).mean()
             ) if len(candidate) else 0.0
             balance_rate = float(candidate["Balance"].notna().mean()) if len(candidate) else 0.0
-            candidates.append((candidate, movement_rate, balance_rate, psm))
+
+            candidates.append({
+                "df": candidate,
+                "psm": psm,
+                "mismatches": mismatches,
+                "movement_rate": movement_rate,
+                "balance_rate": balance_rate,
+            })
         except Exception:
             continue
 
@@ -1247,46 +1256,85 @@ def _ocr_consensus_extract(data, progress_callback=None):
             "No values were invented."
         )
 
-    # Prefer the candidate with the strongest transaction/amount/balance coverage.
-    # Neither OCR pass is trusted as final evidence until the deterministic
-    # integrity gate proves the extracted rows mathematically.
+    # First preference is mathematical correctness, not row count alone.
     candidates.sort(
-        key=lambda item: (item[1], item[2], len(item[0])),
+        key=lambda item: (
+            item["mismatches"] == 0,
+            -item["mismatches"],
+            item["movement_rate"],
+            item["balance_rate"],
+            len(item["df"]),
+        ),
         reverse=True,
     )
-    base_df, _, _, best_psm = candidates[0]
 
-    # Optional visual AI verification. This is an enhancement, NOT a dependency.
-    # The app remains fully functional without a Claude subscription or API key.
+    # If both OCR layouts produce rows, build a conservative row-level consensus.
+    # Matching date + balance + movement amount is treated as independent support.
+    # Disagreeing rows are not silently merged or guessed.
+    base = candidates[0]["df"].copy()
+    if len(candidates) > 1:
+        alt = candidates[1]["df"].copy()
+
+        def amount_key(v):
+            return "" if pd.isna(v) else f"{float(v):.2f}"
+
+        def row_key(row):
+            return (
+                pd.Timestamp(row["Date"]).strftime("%Y-%m-%d") if pd.notna(row["Date"]) else "",
+                amount_key(row["Debit"]),
+                amount_key(row["Credit"]),
+                amount_key(row["Balance"]),
+            )
+
+        alt_keys = {}
+        for _, row in alt.iterrows():
+            alt_keys.setdefault(row_key(row), []).append(row)
+
+        supported = []
+        for _, row in base.iterrows():
+            key = row_key(row)
+            matches = alt_keys.get(key, [])
+            if matches:
+                supported.append(row.to_dict())
+            else:
+                # A row unique to one OCR pass may still be accepted only if the
+                # complete candidate itself mathematically reconciles. Otherwise
+                # it is unsafe evidence and remains outside the final ledger.
+                if candidates[0]["mismatches"] == 0:
+                    supported.append(row.to_dict())
+
+        consensus = pd.DataFrame(supported, columns=base.columns)
+        if not consensus.empty:
+            base = consensus.reset_index(drop=True)
+
+    # Optional visual AI is an enhancement only. Never required.
     if os.getenv("ANTHROPIC_API_KEY"):
         try:
             verified = _claude_visual_verify(
-                data, base_df, progress_callback=progress_callback
+                data, base, progress_callback=progress_callback
             )
             verified = _repair_pdf_side_mapping(verified)
             integrity = validate_transaction_integrity(
                 verified,
-                f"Optional visual AI verification + OCR candidate (psm {best_psm})",
+                f"Optional visual AI verification + OCR consensus (psm {candidates[0]['psm']})",
             )
             return (
                 verified,
                 integrity,
-                f"Optional visual AI verification + independent OCR consensus (psm {best_psm})",
+                f"Optional visual AI verification + OCR consensus (psm {candidates[0]['psm']})",
             )
         except Exception as exc:
-            # Never silently substitute a failed AI result. Fall back to the
-            # deterministic candidate and let the same hard integrity gate decide.
             if progress_callback:
                 progress_callback(
                     0, 1,
-                    f"Visual AI verification unavailable; using deterministic OCR consensus ({exc})"
+                    f"Visual AI verification unavailable; deterministic verification continues: {exc}"
                 )
 
     integrity = validate_transaction_integrity(
-        base_df,
-        f"Deterministic OCR consensus (psm {best_psm})",
+        base,
+        f"Deterministic OCR consensus (psm {candidates[0]['psm']})",
     )
-    return base_df, integrity, f"Deterministic OCR consensus (psm {best_psm})"
+    return base, integrity, f"Deterministic OCR consensus (psm {candidates[0]['psm']})"
 
 
 
@@ -1357,7 +1405,8 @@ def validate_transaction_integrity(df, extraction_method):
     """
     x = df.copy().reset_index(drop=True)
 
-    # Dates must be real calendar dates.
+    # Dates must be real calendar dates and must not contain impossible
+    # future/garbled values relative to the transaction sequence.
     invalid_dates = int(x["Date"].isna().sum())
     if invalid_dates:
         raise ValueError(
@@ -1370,8 +1419,25 @@ def validate_transaction_integrity(df, extraction_method):
     if dual.any():
         raise ValueError(
             f"Data-entry validation failed: {int(dual.sum())} transaction row(s) "
-            "contain both Debit and Credit."
+            "contain both Debit and Credit. No row was auto-corrected."
         )
+
+    # Monetary fields must be finite and non-negative. The bank statement
+    # direction is represented by Debit vs Credit, not by silently negative
+    # amounts in either column.
+    for col in ["Debit", "Credit", "Balance"]:
+        numeric = pd.to_numeric(x[col], errors="coerce")
+        bad = numeric.notna() & ~np.isfinite(numeric)
+        if bad.any():
+            raise ValueError(
+                f"Data-entry validation failed: {int(bad.sum())} non-finite "
+                f"value(s) detected in {col}."
+            )
+        if col in ["Debit", "Credit"] and (numeric.dropna() < 0).any():
+            raise ValueError(
+                f"Data-entry validation failed: negative amount(s) detected in {col}. "
+                "Debit/Credit direction must come from the statement columns."
+            )
 
     movement = x[["Debit", "Credit"]].notna().any(axis=1)
     movement_rate = float(movement.mean()) if len(x) else 0.0
