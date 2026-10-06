@@ -139,6 +139,40 @@ def rail(t):
     return "OTHER / UNIDENTIFIED"
 
 
+def semantic_narration(t, d=np.nan, c=np.nan):
+    """Add a deterministic banking description while preserving the raw narration."""
+    raw = re.sub(r"\s+", " ", str(t or "")).strip()
+    u = raw.upper()
+    if not raw:
+        return "-"
+    rules = [
+        ("Interest Credit", r"\b(?:INTEREST|INT\.?\s*PD|INT\.?\s*CREDIT|INT\.PD)\b"),
+        ("Bank Charge", r"\b(?:AMB|NON\s*MAINTENANCE|BANK\s*CHARGE|SERVICE\s*CHARGE|SMS\s*ALERT|CHRG|CHARGES|GST\s*ON\s*CHARGES)\b"),
+        ("NACH / ACH Debit", r"\b(?:NACH|ACH|ECS)\b"),
+        ("UPI Payment", r"\bUPI\b"),
+        ("IMPS Transfer", r"\bIMPS\b"),
+        ("NEFT Transfer", r"\bNEFT\b"),
+        ("RTGS Transfer", r"\bRTGS\b"),
+        ("ATM / Cash Withdrawal", r"\b(?:ATM|CASH\s*WITHDRAWAL|WDL\s*TFR)\b"),
+        ("Cash Deposit", r"\b(?:CASH\s*DEPOSIT|BY\s*CASH)\b"),
+        ("Cheque Transaction", r"\b(?:CHQ|CHEQUE|CTS|MICR\s*CLG)\b"),
+        ("Salary Credit", r"\b(?:SALARY|BY\s*SALARY)\b"),
+        ("Insurance / Premium", r"\b(?:INSURANCE|PREMIUM|LIC)\b"),
+        ("Loan / Finance Debit", r"\b(?:BAJAJ|FINANCE|LOAN|EMI|NACHDD|HOUSINGFINA|PIRAMAL)\b"),
+        ("Investment / Broking", r"\b(?:BROKING|BROKER|SECURITIES|ZERODHA|ANGEL\s*ONE|ANGELONE)\b"),
+        ("Card / POS Payment", r"\b(?:POS|CARD|DEBIT\s*CARD|CREDIT\s*CARD)\b"),
+        ("Online / Merchant Payment", r"\b(?:AMAZON|FLIPKART|SHOPSY|PAYMENT\s*GATEWAY|RAZORPAY|BILLDESK)\b"),
+        ("Transfer", r"\b(?:TRANSFER|TRF|TFR)\b"),
+    ]
+    for label, pattern in rules:
+        if re.search(pattern, u):
+            return f"[{label}] {raw}"
+    if pd.notna(c) and float(c or 0) > 0 and (pd.isna(d) or float(d or 0) == 0):
+        return f"[Credit / Receipt] {raw}"
+    if pd.notna(d) and float(d or 0) > 0 and (pd.isna(c) or float(c or 0) == 0):
+        return f"[Debit / Expense] {raw}"
+    return raw
+
 def category(t, d, c):
     u = str(t).upper()
     if "CASH DEPOSIT" in u:
@@ -286,6 +320,7 @@ def _normalize_reference_fields(df):
 def enrich(df):
     x = df.copy()
     x = _normalize_reference_fields(x)
+    x["Narration"] = [semantic_narration(t, d, c) for t, d, c in zip(x["Narration"], x["Debit"], x["Credit"])]
     x["Payment_Rail"] = [rail(v) for v in x["Narration"]]
     x["Counterparty"] = x["Narration"].map(counterparty)
     x["Category"] = [category(t, d, c) for t, d, c in zip(x.Narration, x.Debit, x.Credit)]
@@ -1879,9 +1914,6 @@ def build_workbook(df, flags, meta):
     credits = pd.to_numeric(source_df["Credit"], errors="coerce")
     debits = pd.to_numeric(source_df["Debit"], errors="coerce")
 
-    # The first verified transaction keeps its source Balance; subsequent rows
-    # calculate previous balance + Credit - Debit.
-    
     export_df = source_df.copy()
 
     # User-facing transaction schema: exactly one Date column.
