@@ -1165,6 +1165,73 @@ def _repair_pdf_side_mapping(df, tolerance=0.01):
     return x
 
 
+
+def validate_transaction_integrity(df, extraction_method):
+    """Hard evidence gate for transaction data before forensic analysis/export.
+
+    The parser must not silently pass obviously broken dates, duplicated movement
+    sides, or unresolved running-balance errors. OCR is treated the same as native
+    extraction here: if the extracted ledger cannot reconcile, it is a data-entry
+    failure, not an analysis result.
+    """
+    x = df.copy().reset_index(drop=True)
+
+    # Dates must be real calendar dates.
+    invalid_dates = int(x["Date"].isna().sum())
+    if invalid_dates:
+        raise ValueError(
+            f"Data-entry validation failed: {invalid_dates} transaction date(s) "
+            "could not be read as valid calendar dates."
+        )
+
+    # One transaction cannot simultaneously be Debit and Credit.
+    dual = x["Debit"].notna() & x["Credit"].notna()
+    if dual.any():
+        raise ValueError(
+            f"Data-entry validation failed: {int(dual.sum())} transaction row(s) "
+            "contain both Debit and Credit."
+        )
+
+    movement = x[["Debit", "Credit"]].notna().any(axis=1)
+    movement_rate = float(movement.mean()) if len(x) else 0.0
+    if movement_rate < 0.90:
+        raise ValueError(
+            f"Data-entry validation failed: only {movement_rate:.0%} of rows have "
+            "a verified Debit/Credit amount."
+        )
+
+    # Transaction dates should be chronological in a statement. A small number
+    # of reversals can occur in bank exports, but repeated reversals indicate
+    # OCR/column reconstruction damage.
+    dates = pd.to_datetime(x["Date"], errors="coerce")
+    reversals = int((dates.diff().dt.days < 0).sum())
+    if reversals > max(2, int(len(x) * 0.02)):
+        raise ValueError(
+            f"Data-entry validation failed: {reversals} transaction date reversal(s) "
+            "were detected. The extracted date sequence is not reliable."
+        )
+
+    reconciliation = balance_check(x)
+    mismatches = int((reconciliation["Status"] == "MISMATCH").sum()) if not reconciliation.empty else 0
+    if mismatches:
+        first = reconciliation.loc[reconciliation["Status"] == "MISMATCH"].iloc[0]
+        page = first.get("Source_Page", "-")
+        row = first.get("Source_Row", "-")
+        diff = first.get("Difference", np.nan)
+        raise ValueError(
+            f"Data-entry validation failed: {mismatches} running-balance mismatch(es) "
+            f"remain. First mismatch: source page {page}, row {row}, "
+            f"difference {diff:,.2f}. No amount was changed to force a match. "
+            "The statement must be re-extracted with a better column/date mapping."
+        )
+
+    return {
+        "movement_rate": movement_rate,
+        "date_reversals": reversals,
+        "balance_mismatches": mismatches,
+    }
+
+
 def analyze_pdf(data, name, progress_callback=None):
     import fitz
 
@@ -1246,27 +1313,13 @@ def analyze_pdf(data, name, progress_callback=None):
     # only a uniquely provable side inversion; amounts themselves are untouched.
     df = _repair_pdf_side_mapping(df)
 
-    # Final gate: never export a transaction set with dual-sided movement
-    # or unresolved sequential balance mismatches.
-    dual_side = df["Debit"].notna() & df["Credit"].notna()
-    if dual_side.any():
-        raise ValueError("Extraction stopped: at least one transaction contains both Debit and Credit.")
+    # FINAL DATA-ENTRY GATE:
+    # OCR and native extraction must both prove that the ledger is internally
+    # consistent before any forensic classification or export is allowed.
+    integrity = validate_transaction_integrity(df, extraction_method)
+    mismatches = integrity["balance_mismatches"]
 
-    reconciliation = balance_check(df)
-    mismatches = int((reconciliation["Status"] == "MISMATCH").sum()) if not reconciliation.empty else 0
-
-    # Scanned/OCR statements can contain image noise that makes an individual
-    # balance digit unreadable even when the transaction amount itself is
-    # recoverable. Do not silently alter the amount or manufacture a balance.
-    # Instead, allow the OCR dataset through with an explicit review warning.
-    # Native/digital extraction remains a hard reconciliation gate.
-    if mismatches and not extraction_method.startswith("OCR"):
-        raise ValueError(
-            f"Extraction stopped: {mismatches} balance mismatch(es) remain. "
-            "No transaction amount was altered to force a match."
-        )
-
-    movement_presence = df[["Debit", "Credit"]].notna().any(axis=1).mean()
+    movement_presence = integrity["movement_rate"]
     balance_presence = df["Balance"].notna().mean()
 
     if movement_presence < 0.60:
@@ -1295,15 +1348,9 @@ def analyze_pdf(data, name, progress_callback=None):
             "Source_Page is retained for evidence tracing.",
             "Blank amount fields are treated as unknown, not zero.",
             f"Statement-period guard removed {outside_count} extracted row(s) outside the declared transaction period." if outside_count else "All extracted transaction dates fall within the statement's declared period.",
-            (
-                f"OCR balance reconciliation has {mismatches} mismatch(es); "
-                "these are retained as Data Quality review items and no amount "
-                "was changed to force reconciliation."
-                if extraction_method.startswith("OCR") and mismatches
-                else "OCR balance reconciliation passed."
-                if extraction_method.startswith("OCR")
-                else "Native balance reconciliation passed."
-            ),
+            "Data-entry integrity gate passed: dates, movement sides and sequential balances validated.",
+            "No transaction reaches forensic classification/export until the extraction reconciles.",
+
         ],
     }
 
@@ -1509,6 +1556,10 @@ def _format_workbook(wb):
         for row in ws.iter_rows():
             for cell in row:
                 cell.font=Font(name="Bookman Old Style",size=10,bold=False)
+                if ws.title == "02_Transactions" and cell.column in (1, 2):
+                    cell.number_format = "dd-mm-yyyy"
+                if ws.title == "02_Transactions" and cell.column in (5, 6, 7):
+                    cell.number_format = "#,##0.00"
                 cell.alignment=Alignment(vertical="top",wrap_text=False)
                 cell.border=border
                 cell.fill=PatternFill(fill_type=None)
@@ -1520,6 +1571,9 @@ def _format_workbook(wb):
 def build_workbook(df, flags, meta):
     out=io.BytesIO()
     export_df=df.copy()
+    for _col in ["Narration", "Reference", "Payment_Rail", "Counterparty", "Category", "Flag_Reason", "Priority"]:
+        if _col in export_df.columns:
+            export_df[_col] = export_df[_col].replace(r"^\s*$", "-", regex=True).fillna("-")
     # Source_Page is retained internally for evidence tracing, but it is not
     # part of the user's requested transaction export.
     if "Source_Page" in export_df.columns:
