@@ -1330,10 +1330,7 @@ def _ocr_consensus_extract(data, progress_callback=None):
                     f"Visual AI verification unavailable; deterministic verification continues: {exc}"
                 )
 
-    integrity = validate_transaction_integrity(
-        base,
-        f"Deterministic OCR consensus (psm {candidates[0]['psm']})",
-    )
+    integrity = {"balance_mismatches": balance_mismatches(base)}
     return base, integrity, f"Deterministic OCR consensus (psm {candidates[0]['psm']})"
 
 
@@ -1518,7 +1515,7 @@ def analyze_pdf(data, name, progress_callback=None):
             # mathematical evidence gate.
             df = df[df["Date"].notna()].copy()
             df = _repair_pdf_side_mapping(df)
-            integrity = validate_transaction_integrity(df, extraction_method)
+            integrity = {"balance_mismatches": balance_mismatches(df)}
 
     if progress_callback:
         progress_callback(pages, max(pages, 1), "Validating extracted transactions")
@@ -1561,6 +1558,12 @@ def analyze_pdf(data, name, progress_callback=None):
 
     movement_presence = integrity["movement_rate"]
     balance_presence = df["Balance"].notna().mean()
+
+    source_has_balance = bool(re.search(r"\\bbalance\\b|closing\\s+balance", "\\n".join(texts), flags=re.I))
+    if source_has_balance and balance_presence < 0.90:
+        raise ValueError(
+            f"PDF data-entry validation failed: only {balance_presence:.0%} of transaction rows contain a reported Balance although the source exposes a balance column. Extraction stopped; no balance values were invented."
+        )
 
     if movement_presence < 0.60:
         raise ValueError(
