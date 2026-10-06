@@ -26,7 +26,8 @@ def money(x):
     s = str(x).replace(",", "").replace("₹", "").replace("INR", "").strip()
     if s in ("", "-", "—", "nan", "None"):
         return np.nan
-    neg = "-" in s or s.upper().endswith("DR")
+    upper = s.upper().replace(" ", "")
+    neg = "-" in s or upper.endswith("DR") or bool(re.search(r"\(DR\)$", upper))
     m = re.search(r"\d+(?:\.\d+)?", s)
     if not m:
         return np.nan
@@ -81,6 +82,12 @@ def standardize(raw):
     debit = pick(cols, ["withdrawal amt", "withdrawal amount", "debit amt", "debit rs", "debit", "withdrawal", "withdraw"])
     credit = pick(cols, ["deposit amt", "deposit amount", "credit amt", "credit rs", "credit", "deposit"])
     bal = pick(cols, ["closing balance", "closing bal", "balance rs", "balance"])
+    combined_movement = None
+    for c in cols:
+        nc = norm(c)
+        if ("withdrawal" in nc or "debit" in nc) and ("deposit" in nc or "credit" in nc):
+            combined_movement = c
+            break
 
     if not narr:
         raise ValueError("Narration/Description column not found.")
@@ -89,8 +96,22 @@ def standardize(raw):
     out["Date"] = pd.to_datetime(df[date], errors="coerce", dayfirst=True) if date else pd.NaT
     out["Narration"] = df[narr].fillna("").astype(str).str.strip()
     out["Reference"] = df[ref].fillna("").astype(str).str.strip() if ref else pd.Series("", index=df.index)
-    out["Debit"] = df[debit].map(money).abs() if debit else np.nan
-    out["Credit"] = df[credit].map(money).abs() if credit else np.nan
+    if combined_movement is not None:
+        def parse_combined(value, side):
+            if pd.isna(value):
+                return np.nan
+            raw = str(value).strip()
+            upper = raw.upper()
+            if side == "debit" and not re.search(r"\(?\s*DR\s*\)?$", upper):
+                return np.nan
+            if side == "credit" and not re.search(r"\(?\s*CR\s*\)?$", upper):
+                return np.nan
+            return abs(money(raw))
+        out["Debit"] = df[combined_movement].map(lambda v: parse_combined(v, "debit"))
+        out["Credit"] = df[combined_movement].map(lambda v: parse_combined(v, "credit"))
+    else:
+        out["Debit"] = df[debit].map(money).abs() if debit else np.nan
+        out["Credit"] = df[credit].map(money).abs() if credit else np.nan
     out["Balance"] = df[bal].map(money) if bal else np.nan
 
     amount_ok = out[["Debit", "Credit"]].notna().any(axis=1)
@@ -571,6 +592,13 @@ def _native_pdf_position_rows(data, progress_callback=None):
             xs = [center(w) for w, n in items if any(t in n for t in tokens)]
             return min(xs) if xs else None
 
+        combined = phrase_x(["withdrawal (dr) / deposit (cr)", "withdrawal dr deposit cr", "withdrawal (dr) deposit (cr)"])
+        if combined is None:
+            wx = token_x(["withdrawal", "withdraw"])
+            dx = token_x(["deposit", "credit"])
+            if wx is not None and dx is not None and abs(wx - dx) <= 8:
+                combined = (wx + dx) / 2
+
         return {
             "date": phrase_x(["post date", "transaction date", "txn date"])
                     or token_x(["date"]),
@@ -584,8 +612,9 @@ def _native_pdf_position_rows(data, progress_callback=None):
                 "reference", "ref no", "chq/ref no", "cheque/ref no", "cheque no", "chq no", "chq.no",
                 "instrument no", "transaction id", "txn id", "utr no", "utr", "rrn"
             ]) or token_x(["reference", "ref", "cheque", "chq", "utr"]),
-            "debit": token_x(["debit", "withdrawal", "withdraw"]),
-            "credit": token_x(["credit", "deposit"]),
+            "debit": None if combined is not None else token_x(["debit", "withdrawal", "withdraw"]),
+            "credit": None if combined is not None else token_x(["credit", "deposit"]),
+            "movement": combined,
             "balance": phrase_x(["closing balance"]) or token_x(["balance"]),
         }
 
@@ -656,7 +685,7 @@ def _native_pdf_position_rows(data, progress_callback=None):
         centers = header_x_positions(header[1])
         if centers["date"] is None or centers["balance"] is None:
             continue
-        if centers["debit"] is None and centers["credit"] is None:
+        if centers["debit"] is None and centers["credit"] is None and centers.get("movement") is None:
             # A statement without explicit amount columns is not safe to map.
             continue
 
@@ -727,6 +756,24 @@ def _native_pdf_position_rows(data, progress_callback=None):
 
             debit_value = amount_from_bucket("debit")
             credit_value = amount_from_bucket("credit")
+
+            movement_tokens = buckets.get("movement", [])
+            if movement_tokens:
+                debit_value = np.nan
+                credit_value = np.nan
+                for raw_movement in reversed(movement_tokens):
+                    raw_movement = str(raw_movement).strip()
+                    val = abs(money(raw_movement))
+                    if pd.isna(val):
+                        continue
+                    up = raw_movement.upper().replace(" ", "")
+                    if re.search(r"\(DR\)$|DR$", up):
+                        debit_value = val
+                        break
+                    if re.search(r"\(CR\)$|CR$", up):
+                        credit_value = val
+                        break
+
             balance_value = amount_from_bucket("balance")
 
             # One bank transaction cannot be exported with both movement sides.
