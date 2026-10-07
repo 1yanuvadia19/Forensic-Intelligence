@@ -280,6 +280,70 @@ def _repair_movement_from_balance(df, tolerance=0.01):
     return x
 
 
+def _extract_statement_summary(text):
+    """Read optional bank-statement summary totals for independent data-entry QA."""
+    if not text:
+        return {}
+
+    marker = re.search(r"(?is)statement\s+summary", text)
+    if not marker:
+        return {}
+
+    block = text[marker.end():]
+    lines = [re.sub(r"\s+", " ", ln).strip() for ln in block.splitlines() if ln.strip()]
+
+    # Prefer the four monetary lines immediately following the summary labels.
+    money_lines = []
+    for ln in lines[:120]:
+        cleaned = ln.replace("₹", "").strip()
+        if re.fullmatch(r"(?:\(?[\d,]+(?:\.\d+)?\)?)(?:\s*\(?\s*(?:CR|DR)\s*\)?)?", cleaned, flags=re.I):
+            value = money(cleaned)
+            if pd.notna(value):
+                money_lines.append((float(value), cleaned.upper()))
+        if len(money_lines) >= 4:
+            break
+
+    if len(money_lines) < 4:
+        return {}
+
+    opening = money_lines[0][0]
+    withdrawal = money_lines[1][0]
+    deposit = money_lines[2][0]
+    closing = money_lines[3][0]
+
+    # The summary's Dr/Cr suffix determines sign only for opening/closing.
+    opening = -opening if "DR" in money_lines[0][1] else opening
+    closing = -closing if "DR" in money_lines[3][1] else closing
+
+    return {
+        "opening": opening,
+        "withdrawal": withdrawal,
+        "deposit": deposit,
+        "closing": closing,
+    }
+
+
+def _summary_anchor_check(df, summary, tolerance=0.01):
+    """Compare extracted totals/final balance against the bank's own summary."""
+    if not summary:
+        return {"available": False, "match": True, "differences": {}}
+
+    debit_total = pd.to_numeric(df["Debit"], errors="coerce").fillna(0).sum()
+    credit_total = pd.to_numeric(df["Credit"], errors="coerce").fillna(0).sum()
+    balances = pd.to_numeric(df["Balance"], errors="coerce").dropna()
+
+    differences = {
+        "withdrawal": float(debit_total) - float(summary["withdrawal"]),
+        "deposit": float(credit_total) - float(summary["deposit"]),
+        "closing": (float(balances.iloc[-1]) - float(summary["closing"])) if len(balances) else np.nan,
+    }
+    match = all(
+        pd.notna(v) and abs(v) <= tolerance
+        for v in differences.values()
+    )
+    return {"available": True, "match": match, "differences": differences}
+
+
 def rail(t):
     u = str(t).upper()
     rules = [
@@ -1847,7 +1911,9 @@ def analyze_pdf(data, name, progress_callback=None):
 
     # Independent opening-balance anchor. This is an internal QA control only;
     # it is never exported as an artificial transaction row.
-    source_opening_balance = _extract_opening_balance_from_text("\n".join(texts))
+    source_text_all = "\n".join(texts)
+    source_opening_balance = _extract_opening_balance_from_text(source_text_all)
+    source_summary = _extract_statement_summary(source_text_all)
 
     if df.empty:
         raise ValueError("PDF extraction produced no transactions inside the statement's declared period.")
@@ -1865,8 +1931,11 @@ def analyze_pdf(data, name, progress_callback=None):
     # independently passes the same hard integrity gate. This improves coverage
     # without weakening evidence standards.
     initial_anchor = _opening_anchor_check(df, source_opening_balance)
-    needs_recovery = balance_mismatches(df) > 0 or (
-        initial_anchor["available"] and not initial_anchor["match"]
+    initial_summary = _summary_anchor_check(df, source_summary)
+    needs_recovery = (
+        balance_mismatches(df) > 0
+        or (initial_anchor["available"] and not initial_anchor["match"])
+        or (initial_summary["available"] and not initial_summary["match"])
     )
 
     if needs_recovery:
@@ -1915,7 +1984,10 @@ def analyze_pdf(data, name, progress_callback=None):
                     candidate_method,
                 )
                 anchor = _opening_anchor_check(candidate_df, source_opening_balance)
+                summary_anchor = _summary_anchor_check(candidate_df, source_summary)
                 if anchor["available"] and not anchor["match"]:
+                    continue
+                if summary_anchor["available"] and not summary_anchor["match"]:
                     continue
                 df = candidate_df
                 extraction_method = candidate_method
@@ -1947,6 +2019,19 @@ def analyze_pdf(data, name, progress_callback=None):
             f"to the statement's explicit opening balance. Difference: "
             f"{opening_anchor['difference']:,.2f}. No amount was changed to force a match."
         )
+
+    summary_anchor = _summary_anchor_check(df, source_summary)
+    if summary_anchor["available"] and not summary_anchor["match"]:
+        diffs = summary_anchor["differences"]
+        raise ValueError(
+            "Data-entry validation failed: extracted totals/final balance do not "
+            "match the bank statement summary. "
+            f"Withdrawal difference {diffs['withdrawal']:,.2f}; "
+            f"Deposit difference {diffs['deposit']:,.2f}; "
+            f"Closing-balance difference {diffs['closing']:,.2f}. "
+            "No amount was changed to force a match."
+        )
+
     mismatches = integrity["balance_mismatches"]
     balance_gaps = int(integrity.get("balance_gaps", 0))
 
@@ -1991,6 +2076,7 @@ def analyze_pdf(data, name, progress_callback=None):
             "Explicit opening balance was independently checked when present in the source.",
             f"Opening-balance anchor difference: {opening_anchor['difference']:,.2f}." if opening_anchor["available"] else "No explicit opening balance was available for absolute-anchor QA.",
             f"Source opening balance used for internal QA: {source_opening_balance:,.2f}." if pd.notna(source_opening_balance) else "Source opening balance was not explicitly readable.",
+            "Bank statement summary totals/final balance were independently checked when present." if source_summary else "No statement-summary totals were explicitly readable for absolute total QA.",
 
 
         ],
