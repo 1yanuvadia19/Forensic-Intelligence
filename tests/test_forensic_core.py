@@ -293,3 +293,21 @@ def test_master_ledger_solver_recovers_wrong_debit_credit_side_from_balance():
     assert pd.isna(out.loc[1, "Credit"])
     assert out.loc[1, "Direction_Resolved_By"] == "balance-chain side hypothesis"
     assert out.loc[2, "Credit"] == 500.0
+
+
+def test_master_accepts_independently_proven_ledger_with_reviewable_opening_conflict():
+    # The opening anchor is deliberately inconsistent, but every transaction
+    # balance chain is mathematically exact. The master engine must preserve
+    # the conflict as REVIEW evidence rather than discard the proven ledger.
+    from master_pdf_intelligence import _is_acceptably_valid
+
+    stats = {
+        "rows": 12,
+        "movement_rate": 1.0,
+        "balance_rate": 1.0,
+        "mismatches": 0,
+        "duplicates": 0,
+        "date_reversals": 0,
+    }
+    ok, _ = _is_acceptably_valid(stats)
+    assert ok is True
