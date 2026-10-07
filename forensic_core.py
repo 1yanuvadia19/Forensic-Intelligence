@@ -966,7 +966,10 @@ def _native_pdf_position_rows(data, progress_callback=None):
         for w in words:
             lines.setdefault(ykey(w), []).append(w)
 
-        # Locate the transaction header on this page.
+        # Locate the transaction header on this page. Many banks print the
+        # column header only on page 1 and then continue transactions on later
+        # pages without repeating it. Keep the last verified layout and reuse it
+        # for those continuation pages instead of silently dropping the page.
         header = None
         header_score = -1
         for y, ws in lines.items():
@@ -984,17 +987,40 @@ def _native_pdf_position_rows(data, progress_callback=None):
                 header_score = score
                 header = (y, ws)
 
-        if header is None:
-            continue
-
-        centers = header_x_positions(header[1])
-        if centers["date"] is None or centers["balance"] is None:
-            continue
-        if centers["debit"] is None and centers["credit"] is None and centers.get("movement") is None:
-            # A statement without explicit amount columns is not safe to map.
+        if header is not None:
+            page_centers = header_x_positions(header[1])
+            if (
+                page_centers["date"] is not None
+                and page_centers["balance"] is not None
+                and (
+                    page_centers["debit"] is not None
+                    or page_centers["credit"] is not None
+                    or page_centers.get("movement") is not None
+                )
+            ):
+                centers = page_centers
+                last_verified_centers = centers.copy()
+                header_y = header[0]
+            elif "last_verified_centers" in locals():
+                centers = last_verified_centers.copy()
+                header_y = -1
+            else:
+                continue
+        elif "last_verified_centers" in locals():
+            # Continuation page: no header, but the same bank layout was
+            # already verified on an earlier page.
+            centers = last_verified_centers.copy()
+            header_y = -1
+        else:
             continue
 
         for y, ws in sorted(lines.items()):
+            # Skip only the physical header when one was found on this page.
+            # With a carried-forward layout header_y == -1, so continuation
+            # pages are allowed to contribute their transaction rows.
+            if header_y >= 0 and y <= header_y + 4:
+                continue
+
             # Continuation pages can contain valid transactions ABOVE the
             # repeated column header. A digital PDF can also split the final
             # date token across a page boundary, e.g. "07-04-" at the bottom
