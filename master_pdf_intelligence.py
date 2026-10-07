@@ -19,6 +19,8 @@ import re
 import numpy as np
 import pandas as pd
 
+from master_ledger_solver import solve_ledger
+
 
 def _candidate_stats(df):
     if df is None or df.empty:
@@ -188,12 +190,23 @@ def extract_master_pdf(data, name, progress_callback=None):
         frame = _dedupe_candidate(frame)
         if frame.empty:
             return
+
+        # Independent evidence solver: statement order and Debit/Credit side
+        # are hypotheses. It may relabel a side only when the printed balance
+        # chain supports it; monetary values are never changed.
+        frame, ledger_diag = solve_ledger(
+            frame,
+            opening_balance=source_opening,
+            summary=source_summary,
+        )
+        frame = _dedupe_candidate(frame)
         stats = _candidate_stats(frame)
         candidates.append({
             "method": label,
             "df": frame,
             "stats": stats,
             "score": _quality_score(stats),
+            "ledger_diag": ledger_diag,
         })
 
     if progress_callback:
@@ -306,7 +319,8 @@ def extract_master_pdf(data, name, progress_callback=None):
                 f"{x['method']}: rows={x['stats']['rows']}, "
                 f"movement={x['stats']['movement_rate']:.0%}, "
                 f"balance={x['stats']['balance_rate']:.0%}, "
-                f"mismatches={x['stats']['mismatches']}"
+                f"mismatches={x['stats']['mismatches']}, "
+                f"ledger={x.get('ledger_diag', {}).get('order', '?')}"
                 for x in ranked[:4]
             )
             raise ValueError(
@@ -346,6 +360,7 @@ def extract_master_pdf(data, name, progress_callback=None):
             "No transaction amount is fabricated to force reconciliation.",
             "Source_Page and Source_Text are retained for evidence tracing.",
             "Wrapped narrations are reconstructed separately from physical PDF lines.",
+            f"Ledger hypothesis solver selected order={best.get('ledger_diag', {}).get('order', 'n/a')} with {best.get('ledger_diag', {}).get('matches', 0)} balance-chain matches.",
         ],
     }
 
