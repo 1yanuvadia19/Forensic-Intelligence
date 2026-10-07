@@ -304,14 +304,38 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
             opening_anchor = core._opening_anchor_check(frame, source_opening)
             summary_anchor = core._summary_anchor_check(frame, source_summary)
 
-            if opening_anchor["available"] and not opening_anchor["match"]:
-                continue
+            # An explicit opening-anchor conflict is evidence that must remain
+            # visible, but it must not automatically discard a ledger that is
+            # independently proven by its own running-balance chain. In older
+            # bank PDFs the "opening balance" text can be outside the transaction
+            # table or be extracted from a different statement section. The
+            # correct forensic behaviour is REVIEW, not silent rejection.
+            anchor_conflict = bool(
+                opening_anchor.get("available")
+                and not opening_anchor.get("match")
+            )
+            running_chain_proven = bool(
+                item["stats"]["rows"] >= 10
+                and item["stats"]["movement_rate"] >= 0.95
+                and item["stats"]["balance_rate"] >= 0.95
+                and item["stats"]["mismatches"] == 0
+            )
+
             if summary_anchor["available"] and not summary_anchor["match"]:
+                continue
+
+            if anchor_conflict and not running_chain_proven:
                 continue
 
             item["df"] = frame
             item["integrity"] = integrity
             item["opening_anchor"] = opening_anchor
+            item["opening_anchor"]["status"] = (
+                "CONFLICTING" if anchor_conflict else
+                "VERIFIED" if opening_anchor.get("available") else
+                "NOT_PRESENT"
+            )
+            item["opening_anchor"]["requires_review"] = anchor_conflict
             item["summary_anchor"] = summary_anchor
             validated.append(item)
         except Exception:
@@ -337,10 +361,25 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
             opening_anchor = core._opening_anchor_check(merged, source_opening)
             summary_anchor = core._summary_anchor_check(merged, source_summary)
 
-            if opening_anchor["available"] and not opening_anchor["match"]:
-                raise ValueError("opening anchor mismatch")
+            opening_conflict = bool(
+                opening_anchor.get("available") and not opening_anchor.get("match")
+            )
+            merged_chain_proven = bool(
+                merged_stats["rows"] >= 10
+                and merged_stats["movement_rate"] >= 0.95
+                and merged_stats["balance_rate"] >= 0.95
+                and merged_stats["mismatches"] == 0
+            )
+            if opening_conflict and not merged_chain_proven:
+                raise ValueError("opening anchor conflict without independent running-balance proof")
             if summary_anchor["available"] and not summary_anchor["match"]:
                 raise ValueError("summary anchor mismatch")
+            opening_anchor["status"] = (
+                "CONFLICTING" if opening_conflict else
+                "VERIFIED" if opening_anchor.get("available") else
+                "NOT_PRESENT"
+            )
+            opening_anchor["requires_review"] = opening_conflict
 
             best = {
                 "method": "Master ensemble consensus",
@@ -357,7 +396,8 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
                 f"{x['method']}: rows={x['stats']['rows']}, "
                 f"movement={x['stats']['movement_rate']:.0%}, "
                 f"balance={x['stats']['balance_rate']:.0%}, "
-                f"mismatches={x['stats']['mismatches']}"
+                f"mismatches={x['stats']['mismatches']}, "
+                f"opening={x.get('opening_anchor', {}).get('status', 'UNTESTED')}"
                 for x in ranked[:4]
             )
             raise ValueError(
