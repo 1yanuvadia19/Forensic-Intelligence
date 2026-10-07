@@ -10,7 +10,7 @@ from forensic_core import analyze_upload, build_workbook, build_master_analysis,
 
 # Bump this whenever extraction/export logic changes. It prevents Streamlit from
 # reusing a stale in-memory result after a forensic-engine update.
-ANALYSIS_ENGINE_VERSION = "2026-10-07-master-blaster-v14"
+ANALYSIS_ENGINE_VERSION = "2026-10-07-master-blaster-v14.1"
 
 
 # ============================================================
