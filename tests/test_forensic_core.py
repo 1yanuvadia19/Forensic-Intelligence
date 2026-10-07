@@ -245,10 +245,10 @@ def test_master_pdf_intelligence_prefers_reconciling_candidate():
     c.drawString(720, 650, "Closing Balance")
 
     rows = [
-        ("01/04/2016", "PROGRAM MANAGEMENT FEE", "100.00", "", "900.00"),
-        ("02/04/2016", "LOCKER RENT", "10000.00", "", " - "),
-        ("03/04/2016", "CASH DEP GOPAL AHMED", "", "125000.00", "115900.00"),
-        ("04/04/2016", "CREDIT INTEREST CAPITALISED", "", "115.00", "116015.00"),
+        ("01/04/2016", "PROGRAM MANAGEMENT FEE", "100.00", "", "99900.00"),
+        ("02/04/2016", "LOCKER RENT", "10000.00", "", "89900.00"),
+        ("03/04/2016", "CASH DEP GOPAL AHMED", "", "125000.00", "214900.00"),
+        ("04/04/2016", "CREDIT INTEREST CAPITALISED", "", "115.00", "215015.00"),
     ]
     y = 610
     for date, narr, wd, dep, bal in rows:
@@ -270,5 +270,5 @@ def test_master_pdf_intelligence_prefers_reconciling_candidate():
     assert len(out) == 4
     assert out["Debit"].sum() == 10100.0
     assert out["Credit"].sum() == 125115.0
-    assert out.iloc[-1]["Balance"] == 116015.0
+    assert out.iloc[-1]["Balance"] == 215015.0
     assert "Master" not in result["meta"]["layout_confidence"] or result["meta"]["layout_confidence"]
