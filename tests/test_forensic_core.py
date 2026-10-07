@@ -1,5 +1,8 @@
+import io
+
 import numpy as np
 import pandas as pd
+from reportlab.pdfgen import canvas
 
 from forensic_core import (
     money,
@@ -10,6 +13,7 @@ from forensic_core import (
     _opening_anchor_check,
     _summary_anchor_check,
     _normalize_reference_fields,
+    _native_pdf_position_rows,
 )
 
 
@@ -79,3 +83,35 @@ def test_summary_anchor_detects_wrong_extraction():
     result = _summary_anchor_check(df, summary)
     assert result["available"] is True
     assert result["match"] is True
+
+
+def test_native_pdf_reuses_verified_layout_on_continuation_pages():
+    """A PDF may print the table header only once; every page must still be parsed."""
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=(600, 800))
+
+    # Header appears only on page 1.
+    c.drawString(40, 740, "Date")
+    c.drawString(100, 740, "Description")
+    c.drawString(300, 740, "Withdrawal")
+    c.drawString(390, 740, "Deposit")
+    c.drawString(480, 740, "Balance")
+    c.drawString(40, 700, "10/04/2025")
+    c.drawString(100, 700, "UPI PAYMENT")
+    c.drawString(390, 700, "500.00")
+    c.drawString(480, 700, "1500.00")
+    c.showPage()
+
+    # Page 2 deliberately has no repeated column header.
+    c.drawString(40, 740, "11/04/2025")
+    c.drawString(100, 740, "ATM CASH")
+    c.drawString(300, 740, "200.00")
+    c.drawString(480, 740, "1300.00")
+    c.save()
+    buf.seek(0)
+
+    out = _native_pdf_position_rows(buf.getvalue())
+    assert len(out) == 2
+    assert out.iloc[0]["Credit"] == 500.0
+    assert out.iloc[1]["Debit"] == 200.0
+    assert out.iloc[1]["Balance"] == 1300.0
