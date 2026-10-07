@@ -5,6 +5,7 @@ import pandas as pd
 from reportlab.pdfgen import canvas
 
 from pdf_extraction_adapter import _attach_wrapped_narrations
+from bank_pdf_engine import extract_bank_pdf
 from forensic_core import (
     money,
     rail,
@@ -146,3 +147,85 @@ def test_pdf_adapter_preserves_amounts_and_appends_wrapped_narration():
     assert out.iloc[0]["Balance"] == 1500.0
     assert "RAHUL SHARMA" in out.iloc[0]["Narration"]
     assert out.iloc[1]["Debit"] == 200.0
+
+
+def test_bank_pdf_engine_handles_hdfc_style_multi_page_statement():
+    """The refreshed engine must extract every dated movement, not one row."""
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=(900, 700))
+
+    def header():
+        c.drawString(40, 650, "Tran Date")
+        c.drawString(105, 650, "Narration")
+        c.drawString(320, 650, "Chq./Ref.No.")
+        c.drawString(455, 650, "Value Date")
+        c.drawString(570, 650, "Withdrawal Amt.")
+        c.drawString(680, 650, "Deposit Amt.")
+        c.drawString(790, 650, "Closing Balance")
+
+    header()
+    c.drawString(40, 610, "01/04/2016")
+    c.drawString(105, 610, "PROGRAM MANAGEMENT FEE")
+    c.drawString(570, 610, "100.00")
+    c.drawString(790, 610, "900.00")
+    c.drawString(455, 610, "01/04/2016")
+
+    c.drawString(40, 570, "02/04/2016")
+    c.drawString(105, 570, "LOCKER RENT - BRN 305")
+    c.drawString(320, 570, "5050000411060")
+    c.drawString(570, 570, "10,000.00")
+    c.drawString(790, 570, " - ")
+    # This page intentionally omits the balance on one row; the next page
+    # proves the movement direction from its reported balance.
+    c.showPage()
+
+    c.drawString(40, 650, "03/04/2016")
+    c.drawString(105, 650, "CASH DEP GOPAL AHMED")
+    c.drawString(680, 650, "125,000.00")
+    c.drawString(790, 650, "115,900.00")
+    c.drawString(455, 650, "03/04/2016")
+    c.drawString(40, 610, "04/04/2016")
+    c.drawString(105, 610, "CREDIT INTEREST CAPITALISED")
+    c.drawString(680, 610, "115.00")
+    c.drawString(790, 610, "116,015.00")
+    c.save()
+    buf.seek(0)
+
+    out = extract_bank_pdf(buf.getvalue())
+    assert len(out) == 4
+    assert list(out["Date"].dt.strftime("%d/%m/%Y")) == [
+        "01/04/2016", "02/04/2016", "03/04/2016", "04/04/2016"
+    ]
+    assert out.loc[0, "Debit"] == 100.0
+    assert out.loc[2, "Credit"] == 125000.0
+    assert out.loc[3, "Credit"] == 115.0
+    assert out["Source_Page"].nunique() == 2
+
+
+def test_bank_pdf_engine_keeps_wrapped_narration_on_same_transaction():
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=(700, 700))
+    c.drawString(40, 650, "Date")
+    c.drawString(120, 650, "Narration")
+    c.drawString(300, 650, "Reference")
+    c.drawString(420, 650, "Debit")
+    c.drawString(520, 650, "Credit")
+    c.drawString(620, 650, "Balance")
+    c.drawString(40, 610, "10/04/2025")
+    c.drawString(120, 610, "UPI PAYMENT")
+    c.drawString(300, 610, "UPI/123456")
+    c.drawString(520, 610, "500.00")
+    c.drawString(620, 610, "1500.00")
+    c.drawString(120, 590, "RAHUL SHARMA HDFC BANK")
+    c.drawString(40, 550, "11/04/2025")
+    c.drawString(120, 550, "ATM CASH")
+    c.drawString(420, 550, "200.00")
+    c.drawString(620, 550, "1300.00")
+    c.save()
+    buf.seek(0)
+
+    out = extract_bank_pdf(buf.getvalue())
+    assert len(out) == 2
+    assert out.iloc[0]["Credit"] == 500.0
+    assert out.iloc[0]["Balance"] == 1500.0
+    assert "RAHUL SHARMA" in out.iloc[0]["Narration"]
