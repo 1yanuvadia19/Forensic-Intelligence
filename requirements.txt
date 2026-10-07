@@ -8,6 +8,4 @@ pdfplumber>=0.11.10
 reportlab>=3.0
 Pillow>=10.4
 pytesseract>=0.3.13
-easyocr>=1.7.3
-opencv-python-headless>=4.10.0.84
 openai>=1.99
