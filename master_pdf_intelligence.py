@@ -238,8 +238,23 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
         try:
             if progress_callback:
                 progress_callback(5, 10, "📸 OCR: Scanning pages...")
+            def _scanned_progress(done, total, message):
+                # The scanned engine reports its own page progress. Do not pass
+                # that raw 0..N value to Streamlit's global pipeline progress:
+                # otherwise page 6/6 incorrectly renders as 100% while the
+                # master ensemble still has several extraction/validation stages.
+                if progress_callback:
+                    pages_done = max(float(done), 0.0)
+                    pages_total = max(float(total or 1), 1.0)
+                    global_done = 5.0 + (pages_done / pages_total)
+                    progress_callback(
+                        global_done,
+                        10,
+                        message,
+                    )
+
             scanned_df, scanned_meta = extract_scanned_statement(
-                data, progress_callback=progress_callback
+                data, progress_callback=_scanned_progress
             )
             add("Scanned statement OCR grid", scanned_df)
         except Exception:
