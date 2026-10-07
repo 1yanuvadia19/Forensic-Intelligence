@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from reportlab.pdfgen import canvas
 
+from pdf_extraction_adapter import _attach_wrapped_narrations
 from forensic_core import (
     money,
     rail,
@@ -115,3 +116,33 @@ def test_native_pdf_reuses_verified_layout_on_continuation_pages():
     assert out.iloc[0]["Credit"] == 500.0
     assert out.iloc[1]["Debit"] == 200.0
     assert out.iloc[1]["Balance"] == 1300.0
+
+
+def test_pdf_adapter_preserves_amounts_and_appends_wrapped_narration():
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=(600, 800))
+    c.drawString(40, 740, "Date")
+    c.drawString(100, 740, "Description")
+    c.drawString(300, 740, "Withdrawal")
+    c.drawString(390, 740, "Deposit")
+    c.drawString(480, 740, "Balance")
+    c.drawString(40, 700, "10/04/2025")
+    c.drawString(100, 700, "UPI PAYMENT")
+    c.drawString(390, 700, "500.00")
+    c.drawString(480, 700, "1500.00")
+    c.drawString(100, 682, "RAHUL SHARMA HDFC BANK")
+    c.drawString(40, 640, "11/04/2025")
+    c.drawString(100, 640, "ATM CASH")
+    c.drawString(300, 640, "200.00")
+    c.drawString(480, 640, "1300.00")
+    c.save()
+    buf.seek(0)
+
+    extracted = _native_pdf_position_rows(buf.getvalue())
+    out = _attach_wrapped_narrations(buf.getvalue(), extracted)
+
+    assert len(out) == 2
+    assert out.iloc[0]["Credit"] == 500.0
+    assert out.iloc[0]["Balance"] == 1500.0
+    assert "RAHUL SHARMA" in out.iloc[0]["Narration"]
+    assert out.iloc[1]["Debit"] == 200.0
