@@ -137,31 +137,24 @@ def _attach_wrapped_narrations(data, transactions):
     return result
 
 
-def analyze_upload(*args, **kwargs):
-    """Run the forensic pipeline with the refreshed multi-layout PDF engine."""
-    import forensic_core as core
+def analyze_upload(data, name, progress_callback=None):
+    """Route PDFs through the master ensemble; keep Excel/CSV on the core path."""
+    from pathlib import Path
 
-    original_native = core._native_pdf_position_rows
-    original_ocr = core._ocr_pdf_position_rows
-
-    def native_adapter(data, progress_callback=None):
-        return extract_bank_pdf(data, progress_callback=progress_callback)
-
-    def ocr_adapter(data, progress_callback=None, ocr_psm=6):
-        extracted = original_ocr(
+    if Path(name).suffix.lower() == ".pdf":
+        from master_pdf_intelligence import extract_master_pdf
+        return extract_master_pdf(
             data,
+            name,
             progress_callback=progress_callback,
-            ocr_psm=ocr_psm,
         )
-        return _attach_wrapped_narrations(data, extracted)
 
-    core._native_pdf_position_rows = native_adapter
-    core._ocr_pdf_position_rows = ocr_adapter
-    try:
-        return core.analyze_upload(*args, **kwargs)
-    finally:
-        core._native_pdf_position_rows = original_native
-        core._ocr_pdf_position_rows = original_ocr
+    import forensic_core as core
+    return core.analyze_upload(
+        data,
+        name,
+        progress_callback=progress_callback,
+    )
 
 
 from forensic_core import (  # noqa: E402
