@@ -320,6 +320,26 @@ def _extract_statement_summary(text):
                 found[key] = -abs(float(value)) if side == "DR" else abs(float(value))
                 break
 
+    # Some banks print all four labels first and all four values afterwards.
+    # If the labelled segments were empty, read the first four money lines after
+    # the final summary label in that exact documented order.
+    if set(found) != {"opening", "withdrawal", "deposit", "closing"}:
+        block = text[positions[-1][1]:positions[-1][1] + 700]
+        money_values = []
+        for raw in re.findall(amount_pattern, block, flags=re.I):
+            value = money(raw.strip())
+            if pd.notna(value):
+                money_values.append((float(value), raw.strip().upper()))
+            if len(money_values) >= 4:
+                break
+        if len(money_values) >= 4:
+            found = {
+                "opening": -abs(money_values[0][0]) if "DR" in money_values[0][1] else abs(money_values[0][0]),
+                "withdrawal": money_values[1][0],
+                "deposit": money_values[2][0],
+                "closing": -abs(money_values[3][0]) if "DR" in money_values[3][1] else abs(money_values[3][0]),
+            }
+
     if set(found) != {"opening", "withdrawal", "deposit", "closing"}:
         return {}
     return found
