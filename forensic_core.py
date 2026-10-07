@@ -285,39 +285,41 @@ def _extract_statement_summary(text):
     if not text:
         return {}
 
-    # Different banks place the "Statement Summary" caption either before or
-    # after the four labelled values. We therefore anchor each value to its
-    # own label instead of assuming one fixed visual order.
     labels = [
         ("opening", r"opening\s+balance"),
         ("withdrawal", r"total\s+withdrawal\s+amount"),
         ("deposit", r"total\s+deposit\s+amount"),
         ("closing", r"closing\s+balance"),
     ]
+    positions = []
+    for key, label in labels:
+        m = re.search(label, text, flags=re.I)
+        if m:
+            positions.append((m.start(), m.end(), key))
 
+    if len(positions) < 4:
+        return {}
+
+    positions.sort()
     amount_pattern = r"(?:\(?[\d,]+(?:\.\d+)?\)?)(?:\s*\(?\s*(?:CR|DR)\s*\)?)?"
     found = {}
 
-    for key, label in labels:
-        m = re.search(label, text, flags=re.I)
-        if not m:
-            continue
-
-        # Search only a bounded evidence window after the label. This prevents
-        # an unrelated amount elsewhere in the statement from becoming a total.
-        window = text[m.end():m.end() + 700]
+    for idx, (start_pos, end_pos, key) in enumerate(positions):
+        next_start = positions[idx + 1][0] if idx + 1 < len(positions) else end_pos + 700
+        window = text[end_pos:next_start]
         values = re.findall(amount_pattern, window, flags=re.I)
         for raw in values:
             cleaned = raw.strip()
             value = money(cleaned)
             if pd.notna(value):
-                side = "DR" if re.search(r"DR", cleaned, flags=re.I) else "CR" if re.search(r"CR", cleaned, flags=re.I) else ""
-                signed = -abs(float(value)) if side == "DR" else abs(float(value))
-                found[key] = signed
+                side = (
+                    "DR" if re.search(r"DR", cleaned, flags=re.I)
+                    else "CR" if re.search(r"CR", cleaned, flags=re.I)
+                    else ""
+                )
+                found[key] = -abs(float(value)) if side == "DR" else abs(float(value))
                 break
 
-    # A valid summary requires all four anchors. Partial extraction is not
-    # treated as authoritative.
     if set(found) != {"opening", "withdrawal", "deposit", "closing"}:
         return {}
     return found
