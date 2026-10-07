@@ -180,13 +180,10 @@ def _pick_amount(row, geom):
     # Prefer the candidate closest to the discovered amount column. If a
     # service charge is printed in Details, it remains a valid candidate.
     target = geom["amount"]
-    return min(
-        cleaned,
-        key=lambda x: abs(target - geom["amount"])
-    )[0], min(
-        cleaned,
-        key=lambda x: abs(target - geom["amount"])
-    )[1]
+    chosen = min(cleaned, key=lambda x: abs(target - geom["amount"]))
+    # If OCR placed a legacy service charge in Details, the amount itself is
+    # still the strongest candidate in that physical row.
+    return chosen[0], chosen[1]
 
 
 def _pick_balance(row, geom):
