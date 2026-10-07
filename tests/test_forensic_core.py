@@ -272,3 +272,24 @@ def test_master_pdf_intelligence_prefers_reconciling_candidate():
     assert out["Credit"].sum() == 125115.0
     assert out.iloc[-1]["Balance"] == 215015.0
     assert "Master" not in result["meta"]["layout_confidence"] or result["meta"]["layout_confidence"]
+
+
+def test_master_ledger_solver_recovers_wrong_debit_credit_side_from_balance():
+    from master_ledger_solver import solve_ledger
+
+    df = pd.DataFrame({
+        "Date": pd.to_datetime(["2026-01-01", "2026-01-02", "2026-01-03"]),
+        "Narration": ["A", "B", "C"],
+        "Debit": [100.0, np.nan, np.nan],
+        "Credit": [np.nan, 200.0, 500.0],
+        "Balance": [900.0, 700.0, 1200.0],
+        "Source_Seq": [0, 1, 2],
+    })
+
+    out, diag = solve_ledger(df, opening_balance=1000.0, summary={"closing": 1200.0})
+
+    assert diag["order"] == "source"
+    assert out.loc[1, "Debit"] == 200.0
+    assert pd.isna(out.loc[1, "Credit"])
+    assert out.loc[1, "Direction_Resolved_By"] == "balance-chain side hypothesis"
+    assert out.loc[2, "Credit"] == 500.0
