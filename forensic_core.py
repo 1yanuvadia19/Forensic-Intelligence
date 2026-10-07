@@ -135,6 +135,151 @@ def _enforce_single_date_schema(df):
     return x[required + [c for c in x.columns if c not in required]]
 
 
+def _extract_opening_balance_from_text(text):
+    """Extract an explicit statement opening/B/F balance for internal QA only.
+
+    The opening balance is never added to the exported transaction sheet. It is
+    used as an independent anchor so a constant balance offset cannot pass the
+    reconciliation gate merely because the first extracted row was accepted as
+    an arbitrary reference point.
+    """
+    if not text:
+        return np.nan
+
+    patterns = [
+        r"(?is)\bopening\s+balance\b\s*[:\-]?\s*([\d,]+(?:\.\d+)?)\s*\(?\s*(CR|DR)?\s*\)?",
+        r"(?is)\bbrought\s+forward\b\s*[:\-]?\s*([\d,]+(?:\.\d+)?)\s*\(?\s*(CR|DR)?\s*\)?",
+        r"(?is)\bbalance\s+b\s*/\s*f\b\s*[:\-]?\s*([\d,]+(?:\.\d+)?)\s*\(?\s*(CR|DR)?\s*\)?",
+        r"(?is)\bb\s*/\s*f\b\s*([\d,]+(?:\.\d+)?)\s*\(?\s*(CR|DR)?\s*\)?",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text)
+        if not m:
+            continue
+        value = money(m.group(1))
+        if pd.isna(value):
+            continue
+        side = (m.group(2) or "").upper()
+        return -abs(float(value)) if side == "DR" else abs(float(value))
+    return np.nan
+
+
+def _opening_anchor_check(df, opening_balance, tolerance=0.01):
+    """Return an independent opening-balance proof without changing any row."""
+    if pd.isna(opening_balance) or df is None or df.empty:
+        return {"available": False, "match": True, "difference": np.nan}
+
+    first = df.iloc[0]
+    balance = pd.to_numeric(first.get("Balance"), errors="coerce")
+    debit = pd.to_numeric(first.get("Debit"), errors="coerce")
+    credit = pd.to_numeric(first.get("Credit"), errors="coerce")
+    if pd.isna(balance) or (pd.isna(debit) and pd.isna(credit)):
+        return {"available": True, "match": False, "difference": np.nan}
+
+    debit = 0.0 if pd.isna(debit) else float(debit)
+    credit = 0.0 if pd.isna(credit) else float(credit)
+    expected = float(opening_balance) + credit - debit
+    difference = float(balance) - expected
+    return {
+        "available": True,
+        "match": abs(difference) <= tolerance,
+        "difference": difference,
+    }
+
+
+def _sort_transaction_evidence(df):
+    """Put extracted transactions into chronological statement order.
+
+    Source order is retained as a stable tie-breaker for same-day transactions.
+    This prevents a page/layout reconstruction from putting a later date before
+    an earlier date and then using that wrong sequence as the balance chain.
+    """
+    x = df.copy().reset_index(drop=True)
+    if x.empty:
+        return x
+
+    if "Source_Seq" not in x.columns:
+        x["Source_Seq"] = np.arange(len(x))
+
+    x["Date"] = pd.to_datetime(x["Date"], errors="coerce")
+    x["_source_order"] = pd.to_numeric(x["Source_Seq"], errors="coerce")
+    x = x.sort_values(
+        ["Date", "_source_order"],
+        kind="stable",
+        na_position="last",
+    ).drop(columns=["_source_order"]).reset_index(drop=True)
+    return x
+
+
+def _repair_movement_from_balance(df, tolerance=0.01):
+    """Use the bank-reported balance delta to repair a uniquely provable side.
+
+    The amount itself is never invented. When a row contains a single movement
+    amount on the wrong side, the balance delta proves whether it is Debit or
+    Credit. If the mapped amount is wrong but the exact delta amount is visibly
+    present in the row's source text, that amount can be recovered. Otherwise
+    the row is left untouched and the integrity gate reports the mismatch.
+    """
+    if df is None or df.empty or "Balance" not in df.columns:
+        return df
+
+    x = df.copy().reset_index(drop=True)
+    for c in ["Debit", "Credit", "Balance"]:
+        x[c] = pd.to_numeric(x[c], errors="coerce")
+
+    for i in range(1, len(x)):
+        prev = x.at[i - 1, "Balance"]
+        curr = x.at[i, "Balance"]
+        if pd.isna(prev) or pd.isna(curr):
+            continue
+
+        delta = float(curr) - float(prev)
+        debit = x.at[i, "Debit"]
+        credit = x.at[i, "Credit"]
+        expected_side = "Credit" if delta > tolerance else "Debit" if delta < -tolerance else None
+        if expected_side is None:
+            continue
+
+        # First repair a uniquely provable side inversion.
+        if expected_side == "Credit" and pd.notna(debit) and pd.isna(credit):
+            if abs(float(debit) - abs(delta)) <= tolerance:
+                x.at[i, "Credit"] = float(debit)
+                x.at[i, "Debit"] = np.nan
+                continue
+        if expected_side == "Debit" and pd.notna(credit) and pd.isna(debit):
+            if abs(float(credit) - abs(delta)) <= tolerance:
+                x.at[i, "Debit"] = float(credit)
+                x.at[i, "Credit"] = np.nan
+                continue
+
+        # If the mapped amount is not the delta, recover only an exact amount
+        # that is visibly present in the original row evidence.
+        source_text = str(x.at[i, "Source_Text"]) if "Source_Text" in x.columns else ""
+        if not source_text:
+            continue
+
+        target = round(abs(delta), 2)
+        tokens = re.findall(
+            r"(?<!\d)(?:\d{1,3}(?:,\d{2,3})+|\d+(?:\.\d{1,2})?)(?!\d)",
+            source_text,
+        )
+        candidates = []
+        for token in tokens:
+            value = money(token)
+            if pd.notna(value) and abs(float(value) - target) <= tolerance:
+                candidates.append(float(value))
+
+        if len(candidates) == 1:
+            if expected_side == "Credit":
+                x.at[i, "Credit"] = candidates[0]
+                x.at[i, "Debit"] = np.nan
+            else:
+                x.at[i, "Debit"] = candidates[0]
+                x.at[i, "Credit"] = np.nan
+
+    return x
+
+
 def rail(t):
     u = str(t).upper()
     rules = [
@@ -914,6 +1059,7 @@ def _native_pdf_position_rows(data, progress_callback=None):
                         "Credit": credit_value,
                         "Balance": balance_value,
                         "Source_Page": page_no,
+                        "Source_Text": line_text,
                     }]
                 )
             )
@@ -1274,6 +1420,7 @@ def _ocr_pdf_position_rows(data, progress_callback=None, ocr_psm=6):
                 "Credit": credit_value,
                 "Balance": balance_value,
                 "Source_Page": page_no,
+                "Source_Text": line,
             })
             page_rows += 1
 
@@ -1357,6 +1504,7 @@ def _ocr_pdf_position_rows(data, progress_callback=None, ocr_psm=6):
                     "Credit": credit_value,
                     "Balance": balance_value,
                     "Source_Page": page_no,
+                    "Source_Text": line,
                 })
 
         # Explicitly release the large rendered image before the next page.
@@ -1697,8 +1845,18 @@ def analyze_pdf(data, name, progress_callback=None):
     else:
         outside_count = 0
 
+    # Independent opening-balance anchor. This is an internal QA control only;
+    # it is never exported as an artificial transaction row.
+    source_opening_balance = _extract_opening_balance_from_text("\n".join(texts))
+
     if df.empty:
         raise ValueError("PDF extraction produced no transactions inside the statement's declared period.")
+
+    # Normalize the physical extraction into statement date order before any
+    # balance proof. Same-day rows keep their original source order.
+    df = _sort_transaction_evidence(df)
+    df = _repair_movement_from_balance(df)
+    df = _repair_pdf_side_mapping(df)
 
     # MASTER-BLASTER RECOVERY:
     # A non-empty native extraction is not automatically the best extraction.
@@ -1732,6 +1890,8 @@ def analyze_pdf(data, name, progress_callback=None):
         for candidate_method, candidate_df in candidates:
             try:
                 candidate_df = candidate_df[candidate_df["Date"].notna()].copy()
+                candidate_df = _sort_transaction_evidence(candidate_df)
+                candidate_df = _repair_movement_from_balance(candidate_df)
                 candidate_df = _repair_pdf_side_mapping(candidate_df)
 
                 if period_start is not None and period_end is not None:
@@ -1749,6 +1909,9 @@ def analyze_pdf(data, name, progress_callback=None):
                     candidate_df,
                     candidate_method,
                 )
+                anchor = _opening_anchor_check(candidate_df, source_opening_balance)
+                if anchor["available"] and not anchor["match"]:
+                    continue
                 df = candidate_df
                 extraction_method = candidate_method
                 integrity = candidate_integrity
@@ -1767,7 +1930,18 @@ def analyze_pdf(data, name, progress_callback=None):
     # OCR consensus, native position extraction, or an independent fallback
     # must prove that the final ledger is internally consistent before any
     # forensic classification or export is allowed.
+    df = _sort_transaction_evidence(df)
+    df = _repair_movement_from_balance(df)
+    df = _repair_pdf_side_mapping(df)
+
     integrity = validate_transaction_integrity(df, extraction_method)
+    opening_anchor = _opening_anchor_check(df, source_opening_balance)
+    if opening_anchor["available"] and not opening_anchor["match"]:
+        raise ValueError(
+            "Data-entry validation failed: the extracted ledger does not reconcile "
+            f"to the statement's explicit opening balance. Difference: "
+            f"{opening_anchor['difference']:,.2f}. No amount was changed to force a match."
+        )
     mismatches = integrity["balance_mismatches"]
     balance_gaps = int(integrity.get("balance_gaps", 0))
 
@@ -1809,6 +1983,8 @@ def analyze_pdf(data, name, progress_callback=None):
             "Data-entry integrity gate passed: dates, movement sides and sequential balances validated.",
             f"Balance evidence gap/reset points accepted without fabricating a transaction: {balance_gaps}." if balance_gaps else "No balance evidence gap/reset points were required.",
             "No transaction reaches forensic classification/export until the extraction passes the evidence gate.",
+            "Explicit opening balance was independently checked when present in the source.",
+            f"Opening-balance anchor difference: {opening_anchor['difference']:,.2f}." if opening_anchor["available"] else "No explicit opening balance was available for absolute-anchor QA.",
 
         ],
     }
@@ -2010,6 +2186,7 @@ def build_master_analysis(df):
         ["Unidentified rail", int(unknown_mask.sum()), "Classification limitation; not a fraud finding"],
         ["Potential duplicate rows", int(duplicate_mask.sum()), "Requires source verification"],
         ["Balance mismatches", balance_mismatches(x), "Sequential reconciliation"],
+        ["Balance evidence gaps", int(balance_check(x).attrs.get("gap_count", 0)), "Source-gap/reset points; no transaction fabricated"],
     ], columns=["Data_Quality_Item","Count","Meaning"])
 
     provenance_cols = [c for c in ["Source_Sheet","Source_Page","Source_Row"] if c in x.columns]
@@ -2036,7 +2213,7 @@ def _format_workbook(wb):
                 if ws.title == "02_Transactions" and cell.column == 1:
                     cell.number_format = "dd-mm-yyyy"
                 if ws.title == "02_Transactions" and cell.column in (4, 5, 6):
-                    cell.number_format = "#,##0.00"
+                    cell.number_format = '_(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)'
                 cell.alignment=Alignment(vertical="top",wrap_text=False)
                 cell.border=border
                 cell.fill=PatternFill(fill_type=None)
@@ -2088,9 +2265,14 @@ def build_workbook(df, flags, meta):
     # Keep the first verified source balance as the first ledger balance.
     display_df = export_df.copy()
 
-    # Missing Debit/Credit values are displayed as "-".
+    # Each verified transaction has exactly one monetary side. For presentation,
+    # the opposite side is a structural zero; Excel accounting formatting renders
+    # that zero as "-". Internal forensic data remains NaN/unknown where applicable.
     for col in ["Debit", "Credit"]:
-        display_df[col] = display_df[col].where(display_df[col].notna(), "-")
+        display_df[col] = pd.to_numeric(display_df[col], errors="coerce")
+        one_sided = display_df[col].isna()
+        other = "Credit" if col == "Debit" else "Debit"
+        display_df.loc[one_sided & display_df[other].notna(), col] = 0.0
 
     # Balance is exported exactly as extracted from the bank statement.
     # No Excel formulas are inserted; this workbook is a data-entry/evidence export.
