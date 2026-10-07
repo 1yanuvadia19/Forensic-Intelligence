@@ -155,6 +155,7 @@ def extract_master_pdf(data, name, progress_callback=None):
     import fitz
     import forensic_core as core
     from bank_pdf_engine import extract_bank_pdf
+    from scanned_statement_engine import extract_scanned_statement
 
     doc = fitz.open(stream=data, filetype="pdf")
     pages = len(doc)
@@ -211,6 +212,18 @@ def extract_master_pdf(data, name, progress_callback=None):
 
     if progress_callback:
         progress_callback(0, max(pages, 1), "Building extraction ensemble")
+
+    # 0. Image-only scanned-statement vision engine. This is especially
+    # important for old/photocopied statements whose PDF has no text layer.
+    # It reconstructs rows from OCR coordinates rather than trusting OCR text
+    # order, and resolves direction from the printed running balance.
+    try:
+        scanned_df, scanned_meta = extract_scanned_statement(
+            data, progress_callback=progress_callback
+        )
+        add("Scanned statement vision grid", scanned_df)
+    except Exception:
+        scanned_meta = []
 
     # A. Refreshed coordinate engine.
     try:
@@ -359,6 +372,7 @@ def extract_master_pdf(data, name, progress_callback=None):
             "Every exported transaction passed date, movement-side and running-balance validation.",
             "No transaction amount is fabricated to force reconciliation.",
             "Source_Page and Source_Text are retained for evidence tracing.",
+            "Image-only PDFs are routed through coordinate-aware OCR row reconstruction before generic OCR consensus.",
             "Wrapped narrations are reconstructed separately from physical PDF lines.",
             f"Ledger hypothesis solver selected order={best.get('ledger_diag', {}).get('order', 'n/a')} with {best.get('ledger_diag', {}).get('matches', 0)} balance-chain matches.",
         ],
