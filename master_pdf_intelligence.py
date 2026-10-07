@@ -138,6 +138,28 @@ def _merge_supported_rows(candidates):
     ).reset_index(drop=True)
 
 
+def _is_acceptably_valid(stats):
+    """Check if extraction meets minimum quality thresholds.
+    
+    For scanned PDFs, we are lenient on balance but strict on movement.
+    For digital PDFs, we expect both.
+    """
+    if stats["rows"] < 10:
+        return False, "Too few rows"
+
+    if stats["movement_rate"] < 0.95:
+        return False, f"Only {stats['movement_rate']:.0%} rows have movement"
+
+    if stats["balance_rate"] < 0.40:
+        return False, f"Only {stats['balance_rate']:.0%} have balance"
+
+    max_acceptable_mismatches = max(5, int(stats["rows"] * 0.25))
+    if stats["mismatches"] > max_acceptable_mismatches:
+        return False, f"{stats['mismatches']} balance mismatches (max: {max_acceptable_mismatches})"
+
+    return True, "Acceptable quality thresholds met"
+
+
 def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
     """Extract PDF with dual-mode routing and ensemble validation.
     
@@ -158,7 +180,6 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
     text_ratio = sum(bool(t.strip()) for t in texts) / pages if pages else 0.0
     full_text = "\n".join(texts)
 
-    # Auto-detect PDF mode if not specified
     if pdf_mode is None or "auto" in str(pdf_mode).lower():
         pdf_mode = "📸 Scanned/Photographed" if text_ratio < 0.5 else "🏦 Bank Digital PDF"
 
@@ -213,7 +234,6 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
     if progress_callback:
         progress_callback(4, 10, "🔄 Building extraction ensemble...")
 
-    # Scanned PDF path: OCR-first for image-heavy PDFs
     if text_ratio < 0.7:
         try:
             if progress_callback:
@@ -225,7 +245,6 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
         except Exception:
             scanned_meta = []
 
-    # Digital PDF path: native coordinate extraction
     try:
         if progress_callback:
             progress_callback(6, 10, "📄 Native: Coordinate extraction...")
@@ -236,7 +255,6 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
     except Exception:
         pass
 
-    # Legacy coordinate engine as backup
     try:
         if progress_callback:
             progress_callback(6.5, 10, "🔙 Legacy: Position rows...")
@@ -247,7 +265,6 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
     except Exception:
         pass
 
-    # pdfplumber table extraction
     try:
         if progress_callback:
             progress_callback(7, 10, "📊 Table: Reconstruction...")
@@ -255,7 +272,6 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
     except Exception:
         pass
 
-    # OCR consensus
     try:
         if progress_callback:
             progress_callback(7.5, 10, "🤖 OCR: Consensus...")
@@ -271,7 +287,6 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
             "No extraction candidates found. PDF may be encrypted, unreadable, or lack transaction data."
         )
 
-    # Validate through forensic gates
     validated = []
     for item in candidates:
         try:
@@ -279,6 +294,11 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
             frame = core._sort_transaction_evidence(frame)
             frame = core._repair_movement_from_balance(frame)
             frame = core._repair_pdf_side_mapping(frame)
+
+            is_acceptable, reason = _is_acceptably_valid(item["stats"])
+            if not is_acceptable:
+                continue
+
             integrity = core.validate_transaction_integrity(frame, item["method"])
 
             opening_anchor = core._opening_anchor_check(frame, source_opening)
@@ -297,7 +317,6 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
         except Exception:
             continue
 
-    # Select best or merge consensus
     if validated:
         best = max(validated, key=lambda x: x["score"])
     else:
@@ -307,11 +326,17 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
         merged = core._repair_pdf_side_mapping(merged)
 
         try:
+            merged_stats = _candidate_stats(merged)
+            is_acceptable, reason = _is_acceptably_valid(merged_stats)
+            if not is_acceptable:
+                raise ValueError(f"Merged candidate: {reason}")
+
             integrity = core.validate_transaction_integrity(
                 merged, "Master ensemble consensus"
             )
             opening_anchor = core._opening_anchor_check(merged, source_opening)
             summary_anchor = core._summary_anchor_check(merged, source_summary)
+
             if opening_anchor["available"] and not opening_anchor["match"]:
                 raise ValueError("opening anchor mismatch")
             if summary_anchor["available"] and not summary_anchor["match"]:
@@ -323,10 +348,10 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
                 "integrity": integrity,
                 "opening_anchor": opening_anchor,
                 "summary_anchor": summary_anchor,
-                "stats": _candidate_stats(merged),
-                "score": _quality_score(_candidate_stats(merged)),
+                "stats": merged_stats,
+                "score": _quality_score(merged_stats),
             }
-        except Exception:
+        except Exception as e:
             ranked = sorted(candidates, key=lambda x: x["score"], reverse=True)
             diagnostics = "; ".join(
                 f"{x['method']}: rows={x['stats']['rows']}, "
@@ -336,20 +361,23 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
                 for x in ranked[:4]
             )
             raise ValueError(
-                f"Extraction could not validate a complete ledger. Candidates: {diagnostics}"
+                f"Extraction could not produce acceptable results. Candidates: {diagnostics}. Error: {str(e)}"
             )
 
     df = best["df"].copy()
 
-    # Final balance coverage check
     source_has_balance = bool(
         re.search(r"\bbalance\b|closing\s+balance", full_text, re.I)
     )
     balance_presence = float(df["Balance"].notna().mean()) if len(df) else 0.0
-    if source_has_balance and balance_presence < 0.90:
+
+    is_scanned = text_ratio < 0.5
+    min_balance_threshold = 0.40 if is_scanned else 0.90
+
+    if source_has_balance and balance_presence < min_balance_threshold:
         raise ValueError(
             f"Only {balance_presence:.0%} of {len(df)} rows carry a balance. "
-            "Statement evidence is incomplete."
+            f"For {'scanned' if is_scanned else 'digital'} PDFs, minimum is {min_balance_threshold:.0%}."
         )
 
     df = core._enforce_single_date_schema(core.enrich(df))
@@ -362,8 +390,8 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
         "pdf_mode_detected": "Scanned" if text_ratio < 0.7 else "Digital",
         "warnings": [
             f"✓ Extraction method: {best['method']}",
-            f"✓ Ensemble evaluated {len(candidates)} candidate(s) through forensic gates",
-            f"✓ Selected extraction: {len(df):,} transactions validated",
+            f"✓ Ensemble evaluated {len(candidates)} candidate(s)",
+            f"✓ Selected extraction: {len(df):,} transactions",
             f"✓ Balance coverage: {balance_presence:.0%}",
             f"✓ Source pages tracked for every transaction",
         ],
