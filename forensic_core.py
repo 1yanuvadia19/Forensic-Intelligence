@@ -1864,7 +1864,12 @@ def analyze_pdf(data, name, progress_callback=None):
     # deterministic OCR before stopping. A candidate is accepted only if it
     # independently passes the same hard integrity gate. This improves coverage
     # without weakening evidence standards.
-    if balance_mismatches(df) > 0:
+    initial_anchor = _opening_anchor_check(df, source_opening_balance)
+    needs_recovery = balance_mismatches(df) > 0 or (
+        initial_anchor["available"] and not initial_anchor["match"]
+    )
+
+    if needs_recovery:
         original_df = df.copy()
         original_method = extraction_method
         candidates = []
@@ -1985,6 +1990,8 @@ def analyze_pdf(data, name, progress_callback=None):
             "No transaction reaches forensic classification/export until the extraction passes the evidence gate.",
             "Explicit opening balance was independently checked when present in the source.",
             f"Opening-balance anchor difference: {opening_anchor['difference']:,.2f}." if opening_anchor["available"] else "No explicit opening balance was available for absolute-anchor QA.",
+            f"Source opening balance used for internal QA: {source_opening_balance:,.2f}." if pd.notna(source_opening_balance) else "Source opening balance was not explicitly readable.",
+
 
         ],
     }
