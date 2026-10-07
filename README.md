@@ -1,6 +1,6 @@
-# FORENSIC INTELLIGENCE — MASTER BLASTER v13
+# FORENSIC INTELLIGENCE — MASTER BLASTER v14.3
 
-This build is the refreshed forensic extraction engine for bank-statement evidence.
+This build is the refreshed forensic extraction engine for bank-statement evidence with independent data-entry proof.
 
 ## v13 foundation
 
@@ -50,3 +50,4 @@ Double-click START_FORENSIC_TOOL.vbs
 ## Forensic caution
 
 This is an analytical extraction and screening tool, not a certified forensic extraction or legal-conclusion engine. Material findings must always be checked against the original statement and supporting evidence.
+NaN
