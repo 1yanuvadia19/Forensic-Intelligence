@@ -6,11 +6,11 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from forensic_core import analyze_upload, build_workbook, build_master_analysis, build_pdf_report, balance_mismatches
+from pdf_extraction_adapter import analyze_upload, build_workbook, build_master_analysis, build_pdf_report, balance_mismatches
 
 # Bump this whenever extraction/export logic changes. It prevents Streamlit from
 # reusing a stale in-memory result after a forensic-engine update.
-ANALYSIS_ENGINE_VERSION = "2026-10-07-master-blaster-v14.3"
+ANALYSIS_ENGINE_VERSION = "2026-10-07-bank-format-adapter-v15.0"
 
 
 # ============================================================
