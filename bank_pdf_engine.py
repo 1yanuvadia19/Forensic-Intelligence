@@ -425,7 +425,8 @@ def extract_bank_pdf(data, progress_callback=None):
             seq += 1
             page_rows.append(row)
 
-        # Wrapped narration is attached by pdf_extraction_adapter after row extraction.\n        rows.extend(page_rows)
+        # Wrapped narration is attached by pdf_extraction_adapter after row extraction.
+        rows.extend(page_rows)
 
     if not rows:
         return pd.DataFrame()
