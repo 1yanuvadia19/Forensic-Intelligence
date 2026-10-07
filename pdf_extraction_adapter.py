@@ -9,10 +9,7 @@ The adapter uses PyMuPDF word coordinates (not plain text order), which is
 appropriate for PDFs where visual columns are represented by x/y positions.
 """
 
-import io
 import re
-
-import pandas as pd
 
 
 def _norm(value):
@@ -85,14 +82,12 @@ def _attach_wrapped_narrations(data, transactions):
         if not tx_indices:
             continue
 
-        row_positions = []
         date_re = re.compile(r"^\s*(?:\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{2,4})\b", re.I)
         for y, line in ordered:
             if date_re.match(line):
                 for idx in tx_indices:
                     src = str(result.at[idx, "Source_Text"])
                     if str(result.at[idx, "Source_Page"]) == str(page_no) and line[:40] in src:
-                        row_positions.append((y, idx))
                         break
 
         # Fallback: source rows are already in statement order. Attach only
