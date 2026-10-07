@@ -285,42 +285,42 @@ def _extract_statement_summary(text):
     if not text:
         return {}
 
-    marker = re.search(r"(?is)statement\s+summary", text)
-    if not marker:
-        return {}
+    # Different banks place the "Statement Summary" caption either before or
+    # after the four labelled values. We therefore anchor each value to its
+    # own label instead of assuming one fixed visual order.
+    labels = [
+        ("opening", r"opening\s+balance"),
+        ("withdrawal", r"total\s+withdrawal\s+amount"),
+        ("deposit", r"total\s+deposit\s+amount"),
+        ("closing", r"closing\s+balance"),
+    ]
 
-    block = text[marker.end():]
-    lines = [re.sub(r"\s+", " ", ln).strip() for ln in block.splitlines() if ln.strip()]
+    amount_pattern = r"(?:\(?[\d,]+(?:\.\d+)?\)?)(?:\s*\(?\s*(?:CR|DR)\s*\)?)?"
+    found = {}
 
-    # Prefer the four monetary lines immediately following the summary labels.
-    money_lines = []
-    for ln in lines[:120]:
-        cleaned = ln.replace("₹", "").strip()
-        if re.fullmatch(r"(?:\(?[\d,]+(?:\.\d+)?\)?)(?:\s*\(?\s*(?:CR|DR)\s*\)?)?", cleaned, flags=re.I):
+    for key, label in labels:
+        m = re.search(label, text, flags=re.I)
+        if not m:
+            continue
+
+        # Search only a bounded evidence window after the label. This prevents
+        # an unrelated amount elsewhere in the statement from becoming a total.
+        window = text[m.end():m.end() + 700]
+        values = re.findall(amount_pattern, window, flags=re.I)
+        for raw in values:
+            cleaned = raw.strip()
             value = money(cleaned)
             if pd.notna(value):
-                money_lines.append((float(value), cleaned.upper()))
-        if len(money_lines) >= 4:
-            break
+                side = "DR" if re.search(r"DR", cleaned, flags=re.I) else "CR" if re.search(r"CR", cleaned, flags=re.I) else ""
+                signed = -abs(float(value)) if side == "DR" else abs(float(value))
+                found[key] = signed
+                break
 
-    if len(money_lines) < 4:
+    # A valid summary requires all four anchors. Partial extraction is not
+    # treated as authoritative.
+    if set(found) != {"opening", "withdrawal", "deposit", "closing"}:
         return {}
-
-    opening = money_lines[0][0]
-    withdrawal = money_lines[1][0]
-    deposit = money_lines[2][0]
-    closing = money_lines[3][0]
-
-    # The summary's Dr/Cr suffix determines sign only for opening/closing.
-    opening = -opening if "DR" in money_lines[0][1] else opening
-    closing = -closing if "DR" in money_lines[3][1] else closing
-
-    return {
-        "opening": opening,
-        "withdrawal": withdrawal,
-        "deposit": deposit,
-        "closing": closing,
-    }
+    return found
 
 
 def _summary_anchor_check(df, summary, tolerance=0.01):
