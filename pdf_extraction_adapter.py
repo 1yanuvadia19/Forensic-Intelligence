@@ -143,11 +143,20 @@ def analyze_upload(data, name, progress_callback=None):
 
     if Path(name).suffix.lower() == ".pdf":
         from master_pdf_intelligence import extract_master_pdf
-        return extract_master_pdf(
+        result = extract_master_pdf(
             data,
             name,
             progress_callback=progress_callback,
         )
+        import forensic_core as core
+        tx = _attach_wrapped_narrations(data, result["transactions"])
+        tx = core._enforce_single_date_schema(core.enrich(tx))
+        result["transactions"] = tx
+        result["flags"] = tx[tx.Priority.isin(["REVIEW", "CRITICAL"])].copy()
+        result["meta"]["warnings"].append(
+            "Wrapped narration reconstruction was applied after ledger validation; dates and amounts were not altered."
+        )
+        return result
 
     import forensic_core as core
     return core.analyze_upload(
