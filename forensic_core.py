@@ -2468,6 +2468,9 @@ def build_workbook(df, flags, meta):
     cat.insert(0, "Section", "Category")
     flow = pd.concat([rail, cat], ignore_index=True)
 
+    from forensic_bridge_engine import build_forensic_bridge
+    bridge = build_forensic_bridge(source_df)
+
     with pd.ExcelWriter(out, engine="openpyxl") as w:
         summary.to_excel(w, index=False, sheet_name="01_Executive_Summary")
         display_df.to_excel(w, index=False, sheet_name="02_Transactions")
@@ -2510,6 +2513,36 @@ def build_workbook(df, flags, meta):
 
         # Do not re-enter every transaction a second time.
         # Balance exceptions remain visible in the top findings/data-quality analysis.
+
+        # --------------------------------------------------------------
+        # FORENSIC BRIDGE INTELLIGENCE
+        # --------------------------------------------------------------
+        pd.DataFrame({"Section": ["FORENSIC BRIDGE INTELLIGENCE"]}).to_excel(
+            w, index=False, sheet_name=ws_name, startrow=row - 1
+        )
+        row += 1
+
+        bridge_sections = [
+            ("SOURCE → DESTINATION BRIDGES", bridge["bridges"]),
+            ("FUND-TRAIL CHAINS", bridge["chains"]),
+            ("CIRCULAR / ROUND-TRIP CANDIDATES", bridge["circles"]),
+            ("DORMANT ACTIVATION", bridge["dormant"]),
+            ("BEHAVIOURAL DEVIATIONS", bridge["behaviour"]),
+            ("REPEATED TRANSACTION FINGERPRINTS", bridge["fingerprints"]),
+            ("INVESTIGATION QUESTIONS", bridge["questions"]),
+        ]
+        for title, table in bridge_sections:
+            pd.DataFrame({"Section": [title]}).to_excel(
+                w, index=False, sheet_name=ws_name, startrow=row - 1
+            )
+            if table is None or table.empty:
+                pd.DataFrame({"Result": ["No evidence-linked cases identified."]}).to_excel(
+                    w, index=False, sheet_name=ws_name, startrow=row
+                )
+                row += 4
+            else:
+                table.head(250).to_excel(w, index=False, sheet_name=ws_name, startrow=row)
+                row += min(len(table), 250) + 3
 
         _format_workbook(w.book)
 
