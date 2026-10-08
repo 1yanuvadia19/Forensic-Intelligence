@@ -234,7 +234,16 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
     if progress_callback:
         progress_callback(4, 10, "🔄 Building extraction ensemble...")
 
-    if text_ratio < 0.7:
+    explicit_scanned = "scanned" in str(pdf_mode).lower() or "photographed" in str(pdf_mode).lower()
+    explicit_digital = "digital" in str(pdf_mode).lower() or "bank pdf" in str(pdf_mode).lower()
+
+    # Do not run the expensive 3x OCR pass merely because a digital PDF has a
+    # weak/partial text layer. Respect the user's explicit mode first. Native
+    # extraction is cheaper and more precise for real digital PDFs; OCR becomes
+    # a fallback when native candidates cannot be proven.
+    run_scanned_first = explicit_scanned or (not explicit_digital and text_ratio < 0.7)
+
+    if run_scanned_first:
         try:
             if progress_callback:
                 progress_callback(5, 10, "📸 OCR: Scanning pages...")
@@ -286,6 +295,36 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
         add("PDF table reconstruction", core._native_pdf_tables(data))
     except Exception:
         pass
+
+    # If the user selected Digital but the native/text layer produced no
+    # trustworthy candidate, perform OCR as a deliberate fallback. This avoids
+    # paying the OCR cost on every digital PDF while preserving hybrid-PDF support.
+    native_proven = any(
+        x["stats"]["rows"] >= 10
+        and x["stats"]["movement_rate"] >= 0.95
+        and x["stats"]["balance_rate"] >= 0.95
+        and x["stats"]["mismatches"] == 0
+        for x in candidates
+    )
+    if explicit_digital and not native_proven:
+        try:
+            if progress_callback:
+                progress_callback(5, 10, "📸 Native extraction insufficient — OCR fallback...")
+            def _fallback_scanned_progress(done, total, message):
+                if progress_callback:
+                    pages_done = max(float(done), 0.0)
+                    pages_total = max(float(total or 1), 1.0)
+                    progress_callback(
+                        5.0 + (pages_done / pages_total),
+                        10,
+                        message,
+                    )
+            scanned_df, scanned_meta = extract_scanned_statement(
+                data, progress_callback=_fallback_scanned_progress
+            )
+            add("Scanned statement OCR fallback", scanned_df)
+        except Exception:
+            pass
 
     try:
         if progress_callback:
