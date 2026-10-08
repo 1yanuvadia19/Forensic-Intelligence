@@ -649,7 +649,8 @@ def enrich(df):
     x["Payment_Rail"] = [rail(v) for v in raw_narration]
     x["Counterparty"] = raw_narration.map(counterparty)
     x["Category"] = [category(t, d, c) for t, d, c in zip(raw_narration, x.Debit, x.Credit)]
-    x["Narration"] = [semantic_narration(t, d, c) for t, d, c in zip(raw_narration, x["Debit"], x["Credit"])]
+    x["Particulars"] = [semantic_narration(t, d, c) for t, d, c in zip(raw_narration, x["Debit"], x["Credit"])]
+    x["Narration"] = raw_narration
     x["Abs_Amount"] = x[["Debit", "Credit"]].fillna(0).sum(axis=1)
 
     positive = x.loc[x.Abs_Amount > 0, "Abs_Amount"]
