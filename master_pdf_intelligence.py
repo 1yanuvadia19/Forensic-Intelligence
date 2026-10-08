@@ -269,6 +269,9 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
         except Exception:
             scanned_meta = []
 
+    # First native candidate. If it already proves the ledger, do not fan
+    # out into several expensive redundant engines. This is the normal fast
+    # path for production digital PDFs.
     try:
         if progress_callback:
             progress_callback(6, 10, "📄 Native: Coordinate extraction...")
@@ -279,22 +282,42 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
     except Exception:
         pass
 
-    try:
-        if progress_callback:
-            progress_callback(6.5, 10, "🔙 Legacy: Position rows...")
-        add(
-            "Legacy coordinate engine",
-            core._native_pdf_position_rows(data, progress_callback=progress_callback),
-        )
-    except Exception:
-        pass
+    native_proven = any(
+        x["stats"]["rows"] >= 10
+        and x["stats"]["movement_rate"] >= 0.95
+        and x["stats"]["balance_rate"] >= 0.95
+        and x["stats"]["mismatches"] == 0
+        for x in candidates
+    )
 
-    try:
-        if progress_callback:
-            progress_callback(7, 10, "📊 Table: Reconstruction...")
-        add("PDF table reconstruction", core._native_pdf_tables(data))
-    except Exception:
-        pass
+    # If the first native/scanned candidate is already mathematically proven,
+    # stop the ensemble fan-out. Extra engines are fallbacks, not a requirement.
+    if not native_proven:
+        try:
+            if progress_callback:
+                progress_callback(6.5, 10, "🔙 Legacy: Position rows...")
+            add(
+                "Legacy coordinate engine",
+                core._native_pdf_position_rows(data, progress_callback=progress_callback),
+            )
+        except Exception:
+            pass
+
+    native_proven = any(
+        x["stats"]["rows"] >= 10
+        and x["stats"]["movement_rate"] >= 0.95
+        and x["stats"]["balance_rate"] >= 0.95
+        and x["stats"]["mismatches"] == 0
+        for x in candidates
+    )
+
+    if not native_proven:
+        try:
+            if progress_callback:
+                progress_callback(7, 10, "📊 Table: Reconstruction...")
+            add("PDF table reconstruction", core._native_pdf_tables(data))
+        except Exception:
+            pass
 
     # If the user selected Digital but the native/text layer produced no
     # trustworthy candidate, perform OCR as a deliberate fallback. This avoids
