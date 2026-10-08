@@ -311,3 +311,44 @@ def test_master_accepts_independently_proven_ledger_with_reviewable_opening_conf
     }
     ok, _ = _is_acceptably_valid(stats)
     assert ok is True
+
+
+def test_forensic_bridge_reconstructs_onward_movement_without_changing_amounts():
+    from forensic_bridge_engine import build_forensic_bridge
+
+    df = pd.DataFrame({
+        "Date": pd.to_datetime(["2026-01-01", "2026-01-02", "2026-01-05"]),
+        "Narration": ["NEFT CREDIT A", "UPI DEBIT B", "SALARY"],
+        "Reference": ["NEFT/AAA", "UPI/BBB", "SAL/CCC"],
+        "Debit": [np.nan, 100000.0, np.nan],
+        "Credit": [100000.0, np.nan, 50000.0],
+        "Balance": [100000.0, 0.0, 50000.0],
+        "Payment_Rail": ["NEFT", "UPI", "OTHER / UNIDENTIFIED"],
+        "Counterparty": ["ALPHA LTD", "BETA LTD", "EMPLOYER"],
+        "Source_Row": [12, 13, 14],
+    })
+    out = build_forensic_bridge(df)
+    assert not out["bridges"].empty
+    b = out["bridges"].iloc[0]
+    assert b["Source_Amount"] == 100000.0
+    assert b["Destination_Amount"] == 100000.0
+    assert b["Source_Row"] == 12
+    assert b["Destination_Row"] == 13
+
+
+def test_forensic_bridge_never_claims_bridge_as_fraud():
+    from forensic_bridge_engine import build_forensic_bridge
+
+    df = pd.DataFrame({
+        "Date": pd.to_datetime(["2026-01-01", "2026-01-02"]),
+        "Narration": ["CREDIT", "DEBIT"],
+        "Reference": ["A", "B"],
+        "Debit": [np.nan, 100000.0],
+        "Credit": [100000.0, np.nan],
+        "Balance": [100000.0, 0.0],
+        "Payment_Rail": ["NEFT", "UPI"],
+        "Counterparty": ["A", "B"],
+        "Source_Row": [1, 2],
+    })
+    out = build_forensic_bridge(df)
+    assert "fraud" not in str(out["questions"].to_dict()).lower()
