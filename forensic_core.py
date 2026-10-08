@@ -2374,20 +2374,21 @@ def build_workbook(df, flags, meta):
     export_df = source_df.copy()
 
     # User-facing transaction schema: exactly one Date column.
+    # Evidence presentation: exact source narration in Reference; classification in Particulars.
+    export_df["Reference"] = export_df["Narration"].fillna("").astype(str).str.strip()
+    export_df["Particulars"] = export_df.get(
+        "Particulars",
+        [semantic_narration(t, d, c) for t, d, c in zip(export_df["Narration"], export_df["Debit"], export_df["Credit"])]
+    )
     required = [
-        "Date", "Narration", "Reference", "Debit", "Credit", "Balance",
+        "Date", "Reference", "Particulars", "Debit", "Credit", "Balance",
         "Payment_Rail", "Counterparty", "Category", "Flag_Reason",
         "Priority", "Rapid_Movement"
     ]
     export_df = export_df[[c for c in required if c in export_df.columns]].copy()
 
     # Missing textual values are explicit placeholders, not silent blanks.
-    if "Narration" in export_df.columns:
-        export_df["Narration"] = [
-            _humanize_legacy_narration(t, d, c)
-            for t, d, c in zip(export_df["Narration"], export_df["Debit"], export_df["Credit"])
-        ]
-    for col in ["Narration", "Reference"]:
+    for col in ["Reference", "Particulars"]:
         if col in export_df.columns:
             export_df[col] = export_df[col].replace(r"^\s*$", "-", regex=True).fillna("-")
 
@@ -2430,7 +2431,7 @@ def build_workbook(df, flags, meta):
             credits.fillna(0).sum() - debits.fillna(0).sum(),
             int((source_df.Priority == "REVIEW").sum()),
             int((source_df.Priority == "CRITICAL").sum()),
-            balance_mismatches(source_df),
+            int((balance_check(source_df)["Status"] == "MISMATCH").sum()),
             int(balance_check(source_df).attrs.get("gap_count", 0)),
         ],
     })
@@ -2492,12 +2493,8 @@ def build_workbook(df, flags, meta):
         dq.to_excel(w, index=False, sheet_name="04_Master_Analysis", startrow=row)
         row += len(dq) + 3
 
-        pd.DataFrame({"Section": ["BALANCE RECONCILIATION"]}).to_excel(
-            w, index=False, sheet_name="04_Master_Analysis", startrow=row - 1
-        )
-        balance_check(source_df).to_excel(
-            w, index=False, sheet_name="04_Master_Analysis", startrow=row
-        )
+        # Do not re-enter every transaction a second time.
+        # Balance exceptions remain visible in the top findings/data-quality analysis.
 
         _format_workbook(w.book)
 
