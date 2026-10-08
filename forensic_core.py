@@ -2344,24 +2344,33 @@ def _format_workbook(wb):
     from openpyxl.utils import get_column_letter
     thin=Side(style="thin",color="B7B7B7")
     border=Border(left=thin,right=thin,top=thin,bottom=thin)
-    section_names={"FUND-FLOW REVIEW","MONTHLY FLOW","DATA QUALITY","BALANCE RECONCILIATION"}
+    section_names={"FUND-FLOW REVIEW","MONTHLY FLOW","DATA QUALITY"}
     for ws in wb.worksheets:
-        ws.freeze_panes=None
-        ws.auto_filter.ref=ws.dimensions
+        ws.freeze_panes="A2"
+        ws.auto_filter.ref = ws.dimensions if ws.title != "04_Master_Analysis" else None
         for row in ws.iter_rows():
             for cell in row:
                 cell.font=Font(name="Bookman Old Style",size=10,bold=False)
                 if ws.title == "02_Transactions" and cell.column == 1:
                     cell.number_format = "dd-mm-yyyy"
                 if ws.title == "02_Transactions" and cell.column in (4, 5, 6):
-                    cell.number_format = '_(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)'
+                    cell.number_format = '#,##0.00;(#,##0.00);-'
                 cell.alignment=Alignment(vertical="top",wrap_text=False)
                 cell.border=border
                 cell.fill=PatternFill(fill_type=None)
         for cell in ws[1]:
-            cell.font=Font(name="Bookman Old Style",size=10,bold=True)
-            cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=False)
+            cell.font=Font(name="Bookman Old Style",size=10,bold=True,italic=False)
+            cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
             cell.border=border
+
+        # Section headings and every detected table header are visually distinct.
+        for row in ws.iter_rows():
+            first = str(row[0].value or "").strip()
+            if first in section_names:
+                for cell in row:
+                    cell.font = Font(name="Bookman Old Style", size=10, bold=True, italic=True)
+                    cell.alignment = Alignment(horizontal="left", vertical="center")
+                    cell.border = border
 
 def build_workbook(df, flags, meta):
     """Build the evidence export from verified transaction rows.
