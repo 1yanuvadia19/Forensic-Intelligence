@@ -646,10 +646,16 @@ def enrich(df):
     x = df.copy()
     x = _normalize_reference_fields(x)
     raw_narration = x["Narration"].copy()
-    x["Payment_Rail"] = [rail(v) for v in raw_narration]
-    x["Counterparty"] = raw_narration.map(counterparty)
-    x["Category"] = [category(t, d, c) for t, d, c in zip(raw_narration, x.Debit, x.Credit)]
-    x["Particulars"] = [semantic_narration(t, d, c) for t, d, c in zip(raw_narration, x["Debit"], x["Credit"])]
+    # Classification sees the full evidence string (narration + explicit reference),
+    # while the exported Reference remains the exact source narration.
+    evidence_text = [
+        f"{n} {r}".strip()
+        for n, r in zip(raw_narration, x["Reference"].fillna("").astype(str))
+    ]
+    x["Payment_Rail"] = [rail(v) for v in evidence_text]
+    x["Counterparty"] = [counterparty(v) for v in evidence_text]
+    x["Category"] = [category(t, d, c) for t, d, c in zip(evidence_text, x.Debit, x.Credit)]
+    x["Particulars"] = [semantic_narration(t, d, c) for t, d, c in zip(evidence_text, x["Debit"], x["Credit"])]
     x["Narration"] = raw_narration
     x["Abs_Amount"] = x[["Debit", "Credit"]].fillna(0).sum(axis=1)
 
