@@ -319,7 +319,10 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
         try:
             if progress_callback:
                 progress_callback(7, 10, "📊 Table: Reconstruction...")
-            add("PDF table reconstruction", core._native_pdf_tables(data))
+            add(
+                "PDF table reconstruction",
+                core._native_pdf_tables(data, progress_callback=progress_callback),
+            )
         except Exception:
             pass
 
