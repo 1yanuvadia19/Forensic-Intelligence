@@ -765,17 +765,34 @@ def _parse_table_rows(table, page_no):
         return pd.DataFrame()
 
 
-def _native_pdf_tables(data):
+def _native_pdf_tables(data, progress_callback=None):
+    """Reconstruct tables from a PDF with visible, page-level progress.
+
+    pdfplumber's table extraction can be expensive. Report each page and
+    strategy so the UI never appears frozen at the table-reconstruction stage.
+    Try alternative strategies only when the current page yields no usable
+    transaction rows.
+    """
     import pdfplumber
     frames = []
+    settings_list = [
+        {"vertical_strategy": "lines", "horizontal_strategy": "lines"},
+        {"vertical_strategy": "text", "horizontal_strategy": "text", "snap_tolerance": 3, "join_tolerance": 3},
+        {"vertical_strategy": "lines", "horizontal_strategy": "text", "snap_tolerance": 3},
+    ]
     with pdfplumber.open(io.BytesIO(data)) as pdf:
+        total_pages = len(pdf.pages)
         for page_no, page in enumerate(pdf.pages, 1):
-            settings_list = [
-                {"vertical_strategy": "lines", "horizontal_strategy": "lines"},
-                {"vertical_strategy": "text", "horizontal_strategy": "text", "snap_tolerance": 3, "join_tolerance": 3},
-                {"vertical_strategy": "lines", "horizontal_strategy": "text", "snap_tolerance": 3}
-            ]
-            for settings in settings_list:
+            page_frames = []
+            for strategy_no, settings in enumerate(settings_list, 1):
+                if progress_callback:
+                    progress_callback(
+                        7.0 + 0.45 * (
+                            (page_no - 1) + (strategy_no - 1) / len(settings_list)
+                        ) / max(total_pages, 1),
+                        10,
+                        f"Table reconstruction: page {page_no}/{total_pages}, strategy {strategy_no}/{len(settings_list)}",
+                    )
                 try:
                     tables = page.extract_tables(table_settings=settings) or []
                 except Exception:
@@ -783,9 +800,14 @@ def _native_pdf_tables(data):
                 for table in tables:
                     d = _parse_table_rows(table, page_no)
                     if len(d):
-                        frames.append(d)
-                if frames:
+                        page_frames.append(d)
+                # Avoid running more costly strategies on a page where a
+                # usable table was already reconstructed.
+                if page_frames:
                     break
+            frames.extend(page_frames)
+    if progress_callback:
+        progress_callback(7.46, 10, "Table reconstruction complete; validating candidates...")
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
