@@ -123,6 +123,20 @@ def _score_order(df, opening_balance=None, summary=None):
 
         current = next_states or current
 
+        # Missing printed balances can create many hypothetical running
+        # balances. Bound the dynamic-programming beam so long statements
+        # cannot become exponentially slow. Printed balances still anchor the
+        # chain whenever present.
+        MAX_LEDGER_STATES = 512
+        if len(current) > MAX_LEDGER_STATES:
+            current = dict(
+                sorted(
+                    current.items(),
+                    key=lambda item: item[1][0],
+                    reverse=True,
+                )[:MAX_LEDGER_STATES]
+            )
+
     best = max(current.values(), key=lambda v: v[0])
     path = best[3]
     out = df.copy().reset_index(drop=True)
