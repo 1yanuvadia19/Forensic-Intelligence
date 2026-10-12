@@ -965,6 +965,16 @@ def _native_pdf_position_rows(data, progress_callback=None):
         return last_money("debit"), last_money("credit"), last_money("balance")
 
     for page_no, page in enumerate(doc, 1):
+        if progress_callback and (
+            page_no == 1
+            or page_no == len(doc)
+            or page_no % max(1, len(doc) // 20) == 0
+        ):
+            progress_callback(
+                6.5 + 0.45 * page_no / max(len(doc), 1),
+                10,
+                f"Legacy: Position rows page {page_no}/{len(doc)}",
+            )
         words = page.get_text("words")
         if not words:
             continue
