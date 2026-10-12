@@ -356,23 +356,27 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
         except Exception:
             pass
 
-    # OCR consensus is expensive. For an explicitly digital PDF, once a
-    # native candidate has independently proven the ledger (high movement +
-    # high balance coverage + zero running-balance mismatches), STOP adding
-    # redundant OCR work. This is the production fast path: proof beats
-    # unnecessary ensemble fan-out.
-    if not (explicit_digital and native_proven):
+    # OCR consensus is extremely expensive on long digital PDFs. Run it when
+    # native/table candidates are absent or unusable; do not spend another full
+    # multi-pass OCR cycle when an extracted candidate meets the final validator's
+    # minimum quality thresholds. Balance conflicts remain visible to validation.
+    usable_candidate = any(_is_acceptably_valid(x["stats"])[0] for x in candidates)
+    run_ocr_consensus = not explicit_digital or (not native_proven and not usable_candidate)
+
+    if run_ocr_consensus:
         try:
             if progress_callback:
-                progress_callback(7.5, 10, "🤖 OCR: Consensus fallback...")
+                progress_callback(7.5, 10, "🤖 OCR: Consensus fallback (no usable native candidate)...")
             ocr_df, _, ocr_method = core._ocr_consensus_extract(
                 data, progress_callback=progress_callback
             )
             add(ocr_method, ocr_df)
-        except Exception:
-            pass
+        except Exception as exc:
+            if progress_callback:
+                progress_callback(7.5, 10, f"⚠️ OCR consensus failed: {type(exc).__name__}: {exc}")
     elif progress_callback:
-        progress_callback(7.5, 10, "✓ Native ledger proven — OCR consensus skipped")
+        reason = "ledger proven" if native_proven else "usable candidate found; integrity checks still apply"
+        progress_callback(7.5, 10, f"✓ OCR skipped — {reason}")
 
     if not candidates:
         raise ValueError(
