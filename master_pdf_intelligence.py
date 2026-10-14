@@ -160,6 +160,138 @@ def _is_acceptably_valid(stats):
     return True, "Acceptable quality thresholds met"
 
 
+
+def _extract_pnb_statement_rows(data, progress_callback=None):
+    """Coordinate-based parser for PNB's native statement layout.
+
+    PNB prints transaction date and money columns on one baseline while
+    narration is a few points above it. Parse by column coordinates rather
+    than relying on PDF text-stream order, which interleaves columns.
+    """
+    import fitz
+
+    doc = fitz.open(stream=data, filetype="pdf")
+    rows = []
+    money_re = re.compile(r"^[\d,]+\.\d{2}$")
+    date_re = re.compile(r"^\d{2}-\d{2}-\d{4}$")
+
+    for page_no, page in enumerate(doc, start=1):
+        words = page.get_text("words")
+        if not words:
+            continue
+
+        # Require the expected PNB column header on at least the first
+        # transaction-bearing page; this is not a generic PDF fallback.
+        page_text = page.get_text("text")
+        has_pnb_columns = all(
+            token in page_text.lower()
+            for token in ("tran date", "withdrawal", "deposit", "balance", "narration")
+        )
+        dates = []
+        for word in words:
+            x0, y0, x1, y1, token, *_ = word
+            if (
+                x0 < 90
+                and 390 < y0 < page.rect.height - 42
+                and date_re.fullmatch(str(token).strip())
+            ):
+                dates.append((float(y0), str(token).strip()))
+
+        for y, date_text in dates:
+            nearby = [
+                w for w in words
+                if abs(float(w[1]) - y) <= 6.0
+                and float(w[1]) > 390
+                and float(w[1]) < page.rect.height - 35
+            ]
+
+            debit = credit = balance = None
+            cheque_tokens = []
+            for word in nearby:
+                x0, y0, x1, y1, token, *_ = word
+                token = str(token).strip()
+                if money_re.fullmatch(token):
+                    amount = float(token.replace(",", ""))
+                    if 70 <= x0 < 145:
+                        debit = amount
+                    elif 145 <= x0 < 205:
+                        credit = amount
+                    elif 205 <= x0 < 260:
+                        balance = amount
+                elif 250 <= x0 < 320 and token not in {"Alpha", "CHQ.", "NO."}:
+                    cheque_tokens.append(token)
+
+            # A transaction must have a printed running balance and one
+            # movement amount. Never infer or manufacture a missing amount.
+            if balance is None or (debit is None and credit is None):
+                continue
+            if debit is not None and credit is not None:
+                continue
+
+            narration_words = []
+            for word in nearby:
+                x0, y0, x1, y1, token, *_ = word
+                token = str(token).strip()
+                if 320 <= x0 < 510 and not money_re.fullmatch(token):
+                    if token.lower() not in {"cr.", "dr."}:
+                        narration_words.append((float(x0), token))
+            narration = " ".join(t for _, t in sorted(narration_words)).strip()
+
+            # Extract a traceable transaction reference where present.
+            ref_match = re.search(
+                r"\b(?:UPI|IMPS|NEFT|RTGS|ACH|NACH|POS|ATM)[/-][A-Z0-9/-]+",
+                narration,
+                re.I,
+            )
+            reference = (
+                ref_match.group(0)
+                if ref_match
+                else " ".join(cheque_tokens).strip()
+            )
+
+            rows.append({
+                "Date": pd.to_datetime(date_text, dayfirst=True, errors="coerce"),
+                "Narration": narration,
+                "Reference": reference,
+                "Debit": debit,
+                "Credit": credit,
+                "Balance": balance,
+                "Source_Page": page_no,
+                "Source_Text": f"PNB native coordinate parser | page {page_no} | {date_text}",
+            })
+
+        if progress_callback and page_no % 3 == 0:
+            progress_callback(
+                5.5 + 0.4 * page_no / max(len(doc), 1),
+                10,
+                f"PNB native parser: page {page_no}/{len(doc)}",
+            )
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+
+    result = result[result["Date"].notna()].copy()
+    result = result.sort_values(
+        ["Source_Page", "Date"], kind="stable"
+    ).reset_index(drop=True)
+
+    # Guard the bank-specific route: if the file does not have PNB's printed
+    # headers, return no candidate so the existing ensemble can take over.
+    first_page_text = doc[0].get_text("text").lower() if len(doc) else ""
+    signature = all(x in first_page_text for x in (
+        "tran date", "withdrawal", "deposit", "balance", "narration",
+        "alpha chq. no."
+    ))
+    if not signature or not any(
+        all(x in page.get_text("text").lower() for x in ("tran date", "withdrawal", "deposit", "balance", "narration"))
+        for page in doc
+    ):
+        return pd.DataFrame()
+
+    return result
+
+
 def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
     """Extract PDF with dual-mode routing and ensemble validation.
     
@@ -241,7 +373,35 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
     explicit_scanned = "scanned" in str(pdf_mode).lower() or "photographed" in str(pdf_mode).lower()
     explicit_digital = "digital" in str(pdf_mode).lower() or "bank pdf" in str(pdf_mode).lower()
 
-    # Do not run the expensive 3x OCR pass merely because a digital PDF has a
+    # PNB's electronically generated statement has a stable coordinate layout.
+    # Route matching files through a dedicated parser first; the general
+    # ensemble remains available whenever the PNB signature does not match.
+    pnb_signature = all(token in full_text.lower() for token in (
+        "statement of account", "tran date", "withdrawal", "deposit",
+        "alpha chq. no.", "additional info"
+    ))
+    if pnb_signature and not explicit_scanned:
+        try:
+            if progress_callback:
+                progress_callback(5.2, 10, "🏦 PNB layout detected — extracting by source coordinates...")
+            pnb_rows = _extract_pnb_statement_rows(data, progress_callback=progress_callback)
+            if not pnb_rows.empty:
+                add("PNB native coordinate parser", pnb_rows)
+                pnb_item = candidates[-1]
+                pnb_stats = pnb_item["stats"]
+                pnb_proven = (
+                    pnb_stats["rows"] >= 10
+                    and pnb_stats["movement_rate"] >= 0.99
+                    and pnb_stats["balance_rate"] >= 0.99
+                    and pnb_stats["mismatches"] == 0
+                )
+                if pnb_proven and progress_callback:
+                    progress_callback(8.2, 10, f"✓ PNB ledger reconciled: {pnb_stats['rows']} rows, zero running-balance mismatches")
+        except Exception as exc:
+            if progress_callback:
+                progress_callback(5.4, 10, f"⚠️ PNB-specific parser failed; trying general engines: {type(exc).__name__}: {exc}")
+
+    explicit_scanned =    # Do not run the expensive 3x OCR pass merely because a digital PDF has a
     # weak/partial text layer. Respect the user's explicit mode first. Native
     # extraction is cheaper and more precise for real digital PDFs; OCR becomes
     # a fallback when native candidates cannot be proven.
@@ -275,10 +435,19 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
             if progress_callback:
                 progress_callback(5.9, 10, f"⚠️ Scanned OCR candidate failed: {type(exc).__name__}: {exc}")
 
-    # First native candidate. If it already proves the ledger, do not fan
-    # out into several expensive redundant engines. This is the normal fast
-    # path for production digital PDFs.
-    try:
+    # First native candidate. A PNB-specific candidate that already proves
+    # every adjacent balance is stronger evidence than rerunning generic
+    # coordinate/table extractors against the same fixed column layout.
+    pnb_proven = any(
+        x["method"] == "PNB native coordinate parser"
+        and x["stats"]["rows"] >= 10
+        and x["stats"]["movement_rate"] >= 0.99
+        and x["stats"]["balance_rate"] >= 0.99
+        and x["stats"]["mismatches"] == 0
+        for x in candidates
+    )
+    if not pnb_proven:
+        try:
         if progress_callback:
             progress_callback(6, 10, "📄 Native: Coordinate extraction...")
         add(
