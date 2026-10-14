@@ -270,8 +270,10 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
                 data, progress_callback=_scanned_progress
             )
             add("Scanned statement OCR grid", scanned_df)
-        except Exception:
+        except Exception as exc:
             scanned_meta = []
+            if progress_callback:
+                progress_callback(5.9, 10, f"⚠️ Scanned OCR candidate failed: {type(exc).__name__}: {exc}")
 
     # First native candidate. If it already proves the ledger, do not fan
     # out into several expensive redundant engines. This is the normal fast
@@ -283,8 +285,9 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
             "Bank-format-flex coordinate engine",
             extract_bank_pdf(data, progress_callback=progress_callback),
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        if progress_callback:
+            progress_callback(6.4, 10, f"⚠️ Bank-format coordinate extraction failed: {type(exc).__name__}: {exc}")
 
     native_proven = any(
         x["stats"]["rows"] >= 10
@@ -304,8 +307,9 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
                 "Legacy coordinate engine",
                 core._native_pdf_position_rows(data, progress_callback=progress_callback),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            if progress_callback:
+                progress_callback(6.9, 10, f"⚠️ Legacy coordinate extraction failed: {type(exc).__name__}: {exc}")
 
     native_proven = any(
         x["stats"]["rows"] >= 10
@@ -353,8 +357,9 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
                 data, progress_callback=_fallback_scanned_progress
             )
             add("Scanned statement OCR fallback", scanned_df)
-        except Exception:
-            pass
+        except Exception as exc:
+            if progress_callback:
+                progress_callback(7.4, 10, f"⚠️ Table reconstruction failed: {type(exc).__name__}: {exc}")
 
     # OCR consensus is extremely expensive on long digital PDFs. Run it when
     # native/table candidates are absent or unusable; do not spend another full
