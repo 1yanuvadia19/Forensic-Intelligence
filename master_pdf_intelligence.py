@@ -622,7 +622,10 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
                     continue
 
             if anchor_conflict and not running_chain_proven:
-                continue
+                if is_pnb_candidate and integrity.get("review_required"):
+                    integrity["review_reason"] += " Opening-balance anchor also conflicts; verify opening balance against the source PDF."
+                else:
+                    continue
 
             item["df"] = frame
             item["integrity"] = integrity
