@@ -330,37 +330,10 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
         except Exception:
             pass
 
-    # If the user selected Digital but the native/text layer produced no
-    # trustworthy candidate, perform OCR as a deliberate fallback. This avoids
-    # paying the OCR cost on every digital PDF while preserving hybrid-PDF support.
-    native_proven = any(
-        x["stats"]["rows"] >= 10
-        and x["stats"]["movement_rate"] >= 0.95
-        and x["stats"]["balance_rate"] >= 0.95
-        and x["stats"]["mismatches"] == 0
-        for x in candidates
-    )
-    if explicit_digital and not native_proven:
-        try:
-            if progress_callback:
-                progress_callback(5, 10, "📸 Native extraction insufficient — OCR fallback...")
-            def _fallback_scanned_progress(done, total, message):
-                if progress_callback:
-                    pages_done = max(float(done), 0.0)
-                    pages_total = max(float(total or 1), 1.0)
-                    progress_callback(
-                        5.0 + (pages_done / pages_total),
-                        10,
-                        message,
-                    )
-            scanned_df, scanned_meta = extract_scanned_statement(
-                data, progress_callback=_fallback_scanned_progress
-            )
-            add("Scanned statement OCR fallback", scanned_df)
-        except Exception as exc:
-            if progress_callback:
-                progress_callback(7.4, 10, f"⚠️ Table reconstruction failed: {type(exc).__name__}: {exc}")
-
+    # Do not run a second, separate scanned-OCR engine here for an explicitly
+    # digital PDF. The OCR-consensus fallback below is the single fallback path;
+    # running both OCR pipelines serially on a 200-page statement caused long
+    # waits without producing a usable result sooner.
     # OCR consensus is extremely expensive on long digital PDFs. Run it when
     # native/table candidates are absent or unusable; do not spend another full
     # multi-pass OCR cycle when an extracted candidate meets the final validator's
