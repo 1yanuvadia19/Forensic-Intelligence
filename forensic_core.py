@@ -2433,8 +2433,9 @@ def build_workbook(df, flags, meta):
     ]
     required = [
         "Date", "Reference", "Interpreted Narration",
-        "Debit", "Credit", "Balance", "Source_Page", "Balance_Validation",
-        "Balance_Difference", "Payment_Rail", "Counterparty", "Category",
+        "Debit", "Credit", "Balance", "Source_Page", "Source_Row",
+        "Balance_Validation", "Balance_Difference", "Payment_Rail",
+        "Counterparty", "Category",
         "Flag_Reason", "Priority", "Rapid_Movement"
     ]
     export_df = export_df[[c for c in required if c in export_df.columns]].copy()
