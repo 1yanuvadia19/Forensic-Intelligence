@@ -2427,13 +2427,12 @@ def build_workbook(df, flags, meta):
     # in a separate column so a reviewer can compare source wording vs inference.
     # Never replace the source narration with an AI/heuristic rewrite.
     export_df["Reference"] = export_df["Narration"].fillna("").astype(str).str.strip()
-    export_df["Particulars"] = [
+    export_df["Interpreted Narration"] = [
         semantic_narration(t, d, cr)
         for t, d, cr in zip(export_df["Narration"], export_df["Debit"], export_df["Credit"])
     ]
-    export_df["AI Interpretation"] = export_df["Particulars"]
     required = [
-        "Date", "Reference", "AI Interpretation", "Particulars",
+        "Date", "Reference", "Interpreted Narration",
         "Debit", "Credit", "Balance", "Source_Page", "Balance_Validation",
         "Balance_Difference", "Payment_Rail", "Counterparty", "Category",
         "Flag_Reason", "Priority", "Rapid_Movement"
@@ -2441,7 +2440,7 @@ def build_workbook(df, flags, meta):
     export_df = export_df[[c for c in required if c in export_df.columns]].copy()
 
     # Missing textual values are explicit placeholders, not silent blanks.
-    for col in ["Reference", "Particulars"]:
+    for col in ["Reference", "Interpreted Narration"]:
         if col in export_df.columns:
             export_df[col] = export_df[col].replace(r"^\s*$", "-", regex=True).fillna("-")
 
