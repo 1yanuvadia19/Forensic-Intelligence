@@ -775,10 +775,13 @@ def _native_pdf_tables(data, progress_callback=None):
     """
     import pdfplumber
     frames = []
+    # Bank statements usually have aligned text columns without fully ruled
+    # cell borders. Try text-alignment first; use line-based strategies only
+    # when this page did not yield any usable dated transaction rows.
     settings_list = [
-        {"vertical_strategy": "lines", "horizontal_strategy": "lines"},
-        {"vertical_strategy": "text", "horizontal_strategy": "text", "snap_tolerance": 3, "join_tolerance": 3},
+        {"vertical_strategy": "text", "horizontal_strategy": "text", "snap_tolerance": 3, "join_tolerance": 3, "min_words_vertical": 2},
         {"vertical_strategy": "lines", "horizontal_strategy": "text", "snap_tolerance": 3},
+        {"vertical_strategy": "lines", "horizontal_strategy": "lines"},
     ]
     with pdfplumber.open(io.BytesIO(data)) as pdf:
         total_pages = len(pdf.pages)
