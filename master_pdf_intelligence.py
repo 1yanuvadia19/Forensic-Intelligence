@@ -105,6 +105,15 @@ def _period_filter(df, start, end):
 def _dedupe_candidate(df):
     if df.empty:
         return df
+
+    # Bank-specific native parsers may legitimately produce two distinct
+    # transactions with identical date, amount and resulting balance (e.g.
+    # separate UPI debit/reversal pairs). When a source-row identity exists,
+    # preserve each physical source row instead of collapsing it by values.
+    if "Source_Row" in df.columns and df["Source_Row"].notna().all():
+        identity = ["Source_Page", "Source_Row"] if "Source_Page" in df.columns else ["Source_Row"]
+        return df.drop_duplicates(subset=identity, keep="first").reset_index(drop=True)
+
     return df.drop_duplicates(
         subset=["Date", "Narration", "Debit", "Credit", "Balance"],
         keep="first",
@@ -253,6 +262,9 @@ def _extract_pnb_statement_rows(data, progress_callback=None):
             )
 
             rows.append({
+                # Unique physical row identity prevents legitimate same-value
+                # reversals from being mistaken for duplicate transactions.
+                "Source_Row": len(rows) + 1,
                 "Date": pd.to_datetime(date_text, dayfirst=True, errors="coerce"),
                 "Narration": narration,
                 "Reference": reference,
