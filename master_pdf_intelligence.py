@@ -718,6 +718,12 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
         )
 
     df = core._enforce_single_date_schema(core.enrich(df))
+    if "Balance_Validation" in df.columns:
+        review_rows = df["Balance_Validation"].astype(str).str.startswith("REVIEW")
+        if "Priority" in df.columns:
+            df.loc[review_rows, "Priority"] = "REVIEW"
+        if review_rows.any():
+            df.loc[review_rows, "Review_Reason"] = df.loc[review_rows, "Balance_Validation"]
     flags = df[df.Priority.isin(["REVIEW", "CRITICAL"])].copy()
 
     meta = {
@@ -733,5 +739,8 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
             f"✓ Source pages tracked for every transaction",
         ],
     }
+
+    if "Balance_Validation" in df.columns and df["Balance_Validation"].astype(str).str.startswith("REVIEW").any():
+        meta["warnings"].append("⚠️ PNB ledger exported with one explicitly flagged balance mismatch; verify the marked row against the source PDF before relying on totals.")
 
     return {"transactions": df, "flags": flags, "meta": meta}
