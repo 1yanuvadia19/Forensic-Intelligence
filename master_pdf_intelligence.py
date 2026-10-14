@@ -446,8 +446,7 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
         and x["stats"]["mismatches"] == 0
         for x in candidates
     )
-    if not pnb_proven:
-        try:
+    try:
         if progress_callback:
             progress_callback(6, 10, "📄 Native: Coordinate extraction...")
         add(
