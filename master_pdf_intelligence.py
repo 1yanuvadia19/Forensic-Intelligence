@@ -351,15 +351,21 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
         if frame.empty:
             return
 
-        if label == "Legacy coordinate engine" and progress_callback:
-            progress_callback(6.98, 10, "Legacy: validating ledger hypotheses...")
-        frame, ledger_diag = solve_ledger(
-            frame,
-            opening_balance=source_opening,
-            summary=source_summary,
-        )
-        if label == "Legacy coordinate engine" and progress_callback:
-            progress_callback(7.0, 10, "Legacy: ledger validation complete")
+        if label == "PNB native coordinate parser":
+            # The PNB parser already reads the printed ledger in source order.
+            # Do not pass it through the generic hypothesis solver, which can
+            # reorder same-date entries and introduce artificial balance breaks.
+            ledger_diag = {"method": "PNB source-order preserved", "adjustments": 0}
+        else:
+            if label == "Legacy coordinate engine" and progress_callback:
+                progress_callback(6.98, 10, "Legacy: validating ledger hypotheses...")
+            frame, ledger_diag = solve_ledger(
+                frame,
+                opening_balance=source_opening,
+                summary=source_summary,
+            )
+            if label == "Legacy coordinate engine" and progress_callback:
+                progress_callback(7.0, 10, "Legacy: ledger validation complete")
         frame = _dedupe_candidate(frame)
         stats = _candidate_stats(frame)
         candidates.append({
