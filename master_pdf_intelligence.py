@@ -404,7 +404,10 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
             if progress_callback:
                 progress_callback(5.4, 10, f"⚠️ PNB-specific parser failed; trying general engines: {type(exc).__name__}: {exc}")
 
-    explicit_scanned =    # Do not run the expensive 3x OCR pass merely because a digital PDF has a
+    explicit_scanned = "scanned" in str(pdf_mode).lower() or "photographed" in str(pdf_mode).lower()
+    explicit_digital = "digital" in str(pdf_mode).lower() or "bank pdf" in str(pdf_mode).lower()
+
+    # Do not run the expensive 3x OCR pass merely because a digital PDF has a
     # weak/partial text layer. Respect the user's explicit mode first. Native
     # extraction is cheaper and more precise for real digital PDFs; OCR becomes
     # a fallback when native candidates cannot be proven.
