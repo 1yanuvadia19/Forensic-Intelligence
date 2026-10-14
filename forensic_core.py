@@ -2509,78 +2509,14 @@ def build_workbook(df, flags, meta):
     bridge = build_forensic_bridge(source_df)
 
     with pd.ExcelWriter(out, engine="openpyxl") as w:
-        ws_name = "05_Forensic_Bridge"
         summary.to_excel(w, index=False, sheet_name="01_Executive_Summary")
         display_df.to_excel(w, index=False, sheet_name="02_Transactions")
         flow.to_excel(w, index=False, sheet_name="03_Flow_Analysis")
 
+        # Keep Sheet 4 focused on the master analysis table only.
+        # Supporting sections are available in dedicated analysis tabs; do not
+        # append unrelated tables below the main table.
         master.to_excel(w, index=False, sheet_name="04_Master_Analysis")
-        row = len(master) + 3
-        pd.DataFrame({"Section": ["FUND-FLOW REVIEW"]}).to_excel(
-            w, index=False, sheet_name="04_Master_Analysis", startrow=row - 1
-        )
-        if fund_flow.empty:
-            pd.DataFrame({"Result": ["No configured large-credit / onward-debit pattern identified."]}).to_excel(
-                w, index=False, sheet_name="04_Master_Analysis", startrow=row
-            )
-            row += 4
-        else:
-            fund_flow.head(60).to_excel(
-                w, index=False, sheet_name="04_Master_Analysis", startrow=row
-            )
-            row += min(len(fund_flow), 60) + 3
-
-        monthly = source_df.copy()
-        monthly["Month"] = monthly["Date"].dt.to_period("M").astype(str)
-        monthly = (
-            monthly.groupby("Month", dropna=False)
-            .agg(Transactions=("Narration", "size"), Credits=("Credit", "sum"), Debits=("Debit", "sum"))
-            .reset_index()
-        )
-        pd.DataFrame({"Section": ["MONTHLY FLOW"]}).to_excel(
-            w, index=False, sheet_name="04_Master_Analysis", startrow=row - 1
-        )
-        monthly.to_excel(w, index=False, sheet_name="04_Master_Analysis", startrow=row)
-        row += len(monthly) + 3
-
-        pd.DataFrame({"Section": ["DATA QUALITY"]}).to_excel(
-            w, index=False, sheet_name="04_Master_Analysis", startrow=row - 1
-        )
-        dq.to_excel(w, index=False, sheet_name="04_Master_Analysis", startrow=row)
-        row += len(dq) + 3
-
-        # Do not re-enter every transaction a second time.
-        # Balance exceptions remain visible in the top findings/data-quality analysis.
-
-        # --------------------------------------------------------------
-        # FORENSIC BRIDGE INTELLIGENCE
-        # --------------------------------------------------------------
-        pd.DataFrame({"Section": ["FORENSIC BRIDGE INTELLIGENCE"]}).to_excel(
-            w, index=False, sheet_name=ws_name, startrow=row - 1
-        )
-        row += 1
-
-        bridge_sections = [
-            ("SOURCE → DESTINATION BRIDGES", bridge["bridges"]),
-            ("FUND-TRAIL CHAINS", bridge["chains"]),
-            ("CIRCULAR / ROUND-TRIP CANDIDATES", bridge["circles"]),
-            ("DORMANT ACTIVATION", bridge["dormant"]),
-            ("BEHAVIOURAL DEVIATIONS", bridge["behaviour"]),
-            ("REPEATED TRANSACTION FINGERPRINTS", bridge["fingerprints"]),
-            ("INVESTIGATION QUESTIONS", bridge["questions"]),
-        ]
-        for title, table in bridge_sections:
-            pd.DataFrame({"Section": [title]}).to_excel(
-                w, index=False, sheet_name=ws_name, startrow=row - 1
-            )
-            if table is None or table.empty:
-                pd.DataFrame({"Result": ["No evidence-linked cases identified."]}).to_excel(
-                    w, index=False, sheet_name=ws_name, startrow=row
-                )
-                row += 4
-            else:
-                table.head(250).to_excel(w, index=False, sheet_name=ws_name, startrow=row)
-                row += min(len(table), 250) + 3
 
         _format_workbook(w.book)
 
