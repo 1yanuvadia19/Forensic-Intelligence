@@ -327,8 +327,9 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
                 "PDF table reconstruction",
                 core._native_pdf_tables(data, progress_callback=progress_callback),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            if progress_callback:
+                progress_callback(7.4, 10, f"⚠️ Table reconstruction failed: {type(exc).__name__}: {exc}")
 
     # Do not run a second, separate scanned-OCR engine here for an explicitly
     # digital PDF. The OCR-consensus fallback below is the single fallback path;
