@@ -10,7 +10,7 @@ from pdf_extraction_adapter import analyze_upload, build_workbook, build_master_
 
 # Bump this whenever extraction/export logic changes. It prevents Streamlit from
 # reusing a stale in-memory result after a forensic-engine update.
-ANALYSIS_ENGINE_VERSION = "2026-10-14-pnb-source-order-review-v35.0"
+ANALYSIS_ENGINE_VERSION = "2026-10-14-excel-export-narration-fix-v36.0"
 
 
 # ============================================================
