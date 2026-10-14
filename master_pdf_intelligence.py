@@ -187,12 +187,15 @@ def _extract_pnb_statement_rows(data, progress_callback=None):
             token in page_text.lower()
             for token in ("tran date", "withdrawal", "deposit", "balance", "narration")
         )
+        # The first page has a printed column header around y=379. Continuation
+        # pages omit the header, so their transactions start near the top margin.
+        y_min = 390 if has_pnb_columns else 35
         dates = []
         for word in words:
             x0, y0, x1, y1, token, *_ = word
             if (
                 x0 < 90
-                and 390 < y0 < page.rect.height - 42
+                and y_min < y0 < page.rect.height - 42
                 and date_re.fullmatch(str(token).strip())
             ):
                 dates.append((float(y0), str(token).strip()))
@@ -201,7 +204,7 @@ def _extract_pnb_statement_rows(data, progress_callback=None):
             nearby = [
                 w for w in words
                 if abs(float(w[1]) - y) <= 6.0
-                and float(w[1]) > 390
+                and float(w[1]) > y_min
                 and float(w[1]) < page.rect.height - 35
             ]
 
