@@ -616,7 +616,10 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
             )
 
             if summary_anchor["available"] and not summary_anchor["match"]:
-                continue
+                if is_pnb_candidate and integrity.get("review_required"):
+                    integrity["review_reason"] += " Statement summary totals also differ; verify against the source PDF."
+                else:
+                    continue
 
             if anchor_conflict and not running_chain_proven:
                 continue
