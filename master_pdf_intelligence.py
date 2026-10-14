@@ -232,7 +232,7 @@ def _extract_pnb_statement_rows(data, progress_callback=None):
             for word in nearby:
                 x0, y0, x1, y1, token, *_ = word
                 token = str(token).strip()
-                if 320 <= x0 < 510 and not money_re.fullmatch(token):
+                if 320 <= x0 < 495 and not money_re.fullmatch(token):
                     if token.lower() not in {"cr.", "dr."}:
                         narration_words.append((float(x0), token))
             narration = " ".join(t for _, t in sorted(narration_words)).strip()
@@ -281,7 +281,7 @@ def _extract_pnb_statement_rows(data, progress_callback=None):
     first_page_text = doc[0].get_text("text").lower() if len(doc) else ""
     signature = all(x in first_page_text for x in (
         "tran date", "withdrawal", "deposit", "balance", "narration",
-        "alpha chq. no."
+        "alpha", "chq.", "no."
     ))
     if not signature or not any(
         all(x in page.get_text("text").lower() for x in ("tran date", "withdrawal", "deposit", "balance", "narration"))
@@ -378,7 +378,7 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
     # ensemble remains available whenever the PNB signature does not match.
     pnb_signature = all(token in full_text.lower() for token in (
         "statement of account", "tran date", "withdrawal", "deposit",
-        "alpha chq. no.", "additional info"
+        "alpha", "chq.", "no.", "additional info"
     ))
     if pnb_signature and not explicit_scanned:
         try:
