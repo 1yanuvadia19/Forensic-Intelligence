@@ -378,7 +378,7 @@ def extract_master_pdf(data, name, progress_callback=None, pdf_mode=None):
     # ensemble remains available whenever the PNB signature does not match.
     pnb_signature = all(token in full_text.lower() for token in (
         "statement of account", "tran date", "withdrawal", "deposit",
-        "alpha", "chq.", "no.", "additional info"
+        "alpha", "chq.", "no.", "additional", "info"
     ))
     if pnb_signature and not explicit_scanned:
         try:
