@@ -10,7 +10,7 @@ from pdf_extraction_adapter import analyze_upload, build_workbook, build_master_
 
 # Bump this whenever extraction/export logic changes. It prevents Streamlit from
 # reusing a stale in-memory result after a forensic-engine update.
-ANALYSIS_ENGINE_VERSION = "2026-10-14-digital-pdf-single-ocr-v29.0"
+ANALYSIS_ENGINE_VERSION = "2026-10-14-truthful-stage-progress-v30.0"
 
 
 # ============================================================
@@ -352,14 +352,33 @@ if (
     result = cached_result
     st.success("✓ Analysis reused — extraction already complete.")
 else:
-    progress = st.progress(0, text="Initializing forensic analysis…")
+    # Progress callbacks originate from multiple engines and use different
+    # numeric scales (pipeline stages, pages, OCR batches). Never convert those
+    # mixed values into a single overall percentage: that produces misleading
+    # jumps/resets such as 3%, 2%, 1% or a stuck 71%.
+    progress = st.empty()
     status = st.empty()
 
     def show_progress(done, total, message):
-        total = max(int(total or 1), 1)
-        pct = max(0.0, min(float(done) / total, 1.0))
-        progress.progress(pct, text=f"{int(pct * 100)}% — {message}")
-        status.caption(f"**Progress:** {int(pct * 100)}% | {message}")
+        import re
+
+        label = str(message or "Processing evidence…")
+        status.caption(f"**Current operation:** {label}")
+
+        # Only show a numeric bar when the callback explicitly reports real
+        # page-level progress. This is stage-local progress, not overall completion.
+        page_match = re.search(r"page\\s+(\\d+)\\s*/\\s*(\\d+)", label, flags=re.I)
+        if page_match:
+            page_no = max(1, int(page_match.group(1)))
+            total_pages = max(1, int(page_match.group(2)))
+            fraction = min(page_no / total_pages, 1.0)
+            progress.progress(
+                fraction,
+                text=f"Stage progress — page {page_no}/{total_pages}",
+            )
+        else:
+            # Do not leave a stale page percentage visible while another stage runs.
+            progress.empty()
 
     try:
         result = analyze_upload(
