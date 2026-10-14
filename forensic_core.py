@@ -2423,17 +2423,20 @@ def build_workbook(df, flags, meta):
 
     export_df = source_df.copy()
 
-    # User-facing transaction schema: exactly one Date column.
-    # Evidence presentation: exact source narration in Reference; classification in Particulars.
+    # Keep the bank's narration verbatim in Reference. Put our interpretation
+    # in a separate column so a reviewer can compare source wording vs inference.
+    # Never replace the source narration with an AI/heuristic rewrite.
     export_df["Reference"] = export_df["Narration"].fillna("").astype(str).str.strip()
-    export_df["Particulars"] = export_df.get(
-        "Particulars",
-        [semantic_narration(t, d, c) for t, d, c in zip(export_df["Narration"], export_df["Debit"], export_df["Credit"])]
-    )
+    export_df["Particulars"] = [
+        semantic_narration(t, d, cr)
+        for t, d, cr in zip(export_df["Narration"], export_df["Debit"], export_df["Credit"])
+    ]
+    export_df["AI Interpretation"] = export_df["Particulars"]
     required = [
-        "Date", "Reference", "Particulars", "Debit", "Credit", "Balance",
-        "Payment_Rail", "Counterparty", "Category", "Flag_Reason",
-        "Priority", "Rapid_Movement"
+        "Date", "Reference", "AI Interpretation", "Particulars",
+        "Debit", "Credit", "Balance", "Source_Page", "Balance_Validation",
+        "Balance_Difference", "Payment_Rail", "Counterparty", "Category",
+        "Flag_Reason", "Priority", "Rapid_Movement"
     ]
     export_df = export_df[[c for c in required if c in export_df.columns]].copy()
 
@@ -2507,6 +2510,7 @@ def build_workbook(df, flags, meta):
     bridge = build_forensic_bridge(source_df)
 
     with pd.ExcelWriter(out, engine="openpyxl") as w:
+        ws_name = "05_Forensic_Bridge"
         summary.to_excel(w, index=False, sheet_name="01_Executive_Summary")
         display_df.to_excel(w, index=False, sheet_name="02_Transactions")
         flow.to_excel(w, index=False, sheet_name="03_Flow_Analysis")
